@@ -1,0 +1,17 @@
+# Knitted output — regenerate from the .Rmd rather than committing it
+analyses/**/*.html
+analyses/**/*.pdf
+analyses/**/*.md
+analyses/**/figure/
+analyses/**/*_files/
+analyses/**/*_cache/
+analyses/**/cache/
+
+# R session cruft
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
+
+# macOS
+.DS_Store

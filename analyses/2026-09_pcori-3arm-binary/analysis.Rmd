@@ -1,0 +1,243 @@
+---
+title: "PCORI LOI — three-arm pragmatic trial, binary outcome"
+subtitle: "Sample size, achieved power at budget, and subgroup power"
+author: "Zhe Chen"
+date: "September 2026"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    df_print: kable
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 8, fig.height = 4.5)
+source("../../R/load.R")
+library(knitr)
+```
+
+## The question
+
+Three arms — one control, two *different* active interventions — with a fixed
+budget of **N = 3000**, so 1000 per arm. The clinicians need to read two things
+straight off a table:
+
+1. How large does an arm have to be to detect a given improvement over control?
+2. At the budget we actually have, what effect can we detect — overall, and
+   within the rural and urban subgroups?
+
+The two active arms are **not** assumed to have the same effect. Every table
+below varies one arm at a time, so a reader can pick the row matching whatever
+they believe about each intervention separately.
+
+### Multiplicity
+
+Two primary comparisons (each active vs. control) → Bonferroni **α = 0.025**.
+Three pairwise comparisons, if the active-vs-active contrast is also treated as
+confirmatory → **α = 0.0167**. Both are shown throughout; which one applies is a
+protocol decision, not a statistical one.
+
+```{r design}
+d <- design_binary_parallel()
+d
+n_arm <- 1000   # 3000 total / 3 arms
+```
+
+## Table 1a — required n per arm, active vs. control
+
+```{r t1a}
+controls <- seq(0.30, 0.50, by = 0.05)
+diffs    <- c(0.050, 0.075, 0.100)
+
+req_n <- function(p0, p1, alpha, target = 0.80) {
+  ceiling(power.prop.test(p1 = p0, p2 = p1, sig.level = alpha,
+                          power = target, alternative = "two.sided")$n)
+}
+
+T1 <- expand.grid(control = controls, diff = diffs)
+T1 <- T1[order(T1$control, T1$diff), ]
+T1$active <- T1$control + T1$diff
+T1$n_a025  <- mapply(req_n, T1$control, T1$active, 0.025)
+T1$n_a0167 <- mapply(req_n, T1$control, T1$active, 0.05 / 3)
+
+kable(data.frame(
+  Control = sprintf("%.0f%%", T1$control * 100),
+  Active  = sprintf("%.0f%%", T1$active * 100),
+  `Difference (pp)` = T1$diff * 100,
+  `n/arm, alpha = 0.025`  = T1$n_a025,
+  `n/arm, alpha = 0.0167` = T1$n_a0167,
+  check.names = FALSE
+), caption = "Required n per arm for 80% power, active vs. control.")
+```
+
+These use `power.prop.test`, i.e. the normal approximation — the convention in
+protocols, and what a reviewer will reproduce if they check. The simulation
+below confirms it.
+
+## Table 1b — achieved power at the budget (1000/arm)
+
+Run through the library so the numbers are simulated end-to-end rather than
+read off a formula. The `power_analytic` column is the **exact** power of the
+test being simulated (enumerated over every possible 2×2 table), which is what
+makes the agreement meaningful.
+
+```{r t1b, cache = TRUE}
+g1 <- scenarios(p = lapply(seq_len(nrow(T1)), function(i) c(T1$control[i], T1$active[i])))
+g1$n_per_arm    <- n_arm
+g1$alpha        <- 0.05
+g1$adjust       <- "bonferroni"
+g1$n_comparisons <- 2
+
+r1 <- check_against_analytic(d, g1, n_sim = 4000, seed = 2026, verbose = FALSE)
+
+kable(data.frame(
+  Control = sprintf("%.0f%%", T1$control * 100),
+  Active  = sprintf("%.0f%%", T1$active * 100),
+  `Diff (pp)` = T1$diff * 100,
+  `Power (simulated)` = sprintf("%.3f", r1$power),
+  `MC SE` = sprintf("%.3f", r1$mc_se),
+  `Power (exact)` = sprintf("%.3f", r1$power_analytic),
+  Agree = ifelse(r1$within_mc, "yes", "no"),
+  check.names = FALSE
+), caption = "Power at 1000/arm, alpha = 0.025. Simulation vs. exact enumeration.")
+```
+
+```{r t1b-check}
+sprintf("Scenarios where the exact value falls inside the simulation's MC interval: %d / %d (max |diff| = %.4f)",
+        sum(r1$within_mc), nrow(r1), max(r1$abs_diff))
+```
+
+## Table 2 — active 1 vs. active 2
+
+The secondary/exploratory contrast. Gaps are smaller here, since both arms are
+active.
+
+```{r t2}
+active1s <- c(0.30, 0.35, 0.40, 0.45, 0.50)
+gaps     <- c(0.030, 0.050, 0.075, 0.100)
+
+T2 <- expand.grid(active1 = active1s, gap = gaps)
+T2 <- T2[order(T2$active1, T2$gap), ]
+T2$active2 <- T2$active1 + T2$gap
+T2$n_a05   <- mapply(req_n, T2$active1, T2$active2, 0.05)
+T2$n_a0167 <- mapply(req_n, T2$active1, T2$active2, 0.05 / 3)
+T2$pow_a05   <- mapply(function(a, b) power.prop.test(n_arm, a, b, 0.05)$power,
+                       T2$active1, T2$active2)
+T2$pow_a0167 <- mapply(function(a, b) power.prop.test(n_arm, a, b, 0.05/3)$power,
+                       T2$active1, T2$active2)
+
+kable(data.frame(
+  `Active 1` = sprintf("%.0f%%", T2$active1 * 100),
+  `Active 2` = sprintf("%.0f%%", T2$active2 * 100),
+  `Gap (pp)` = T2$gap * 100,
+  `n/arm, alpha = 0.05`   = T2$n_a05,
+  `n/arm, alpha = 0.0167` = T2$n_a0167,
+  `Power at 1000/arm, alpha = 0.05`   = sprintf("%.3f", T2$pow_a05),
+  `Power at 1000/arm, alpha = 0.0167` = sprintf("%.3f", T2$pow_a0167),
+  check.names = FALSE
+), caption = "Active 1 vs. Active 2: required n and power at the budget.")
+```
+
+## Table 3 — subgroup power
+
+The trial is 1/3 rural, 2/3 urban, so at the budget each arm contributes
+**333 rural** and **667 urban** participants. Subgroup power is just the same
+design at a smaller n — no new machinery needed, which is the point of keeping
+`n_per_arm` a parameter.
+
+```{r t3, cache = TRUE}
+n_rural <- round(n_arm / 3)      # 333
+n_urban <- round(n_arm * 2 / 3)  # 667
+
+baselines <- c(0.25, 0.30, 0.35, 0.40, 0.45, 0.50)
+effects   <- c(0.050, 0.075, 0.100, 0.125)
+
+T3 <- expand.grid(control = baselines, diff = effects)
+T3 <- T3[order(T3$control, T3$diff), ]
+T3$active <- T3$control + T3$diff
+
+g3 <- scenarios(p = lapply(seq_len(nrow(T3)), function(i) c(T3$control[i], T3$active[i])))
+g3 <- do.call(rbind, lapply(c(n_rural, n_urban), function(nn) { g3$n_per_arm <- nn; g3 }))
+g3$alpha <- 0.05; g3$adjust <- "bonferroni"; g3$n_comparisons <- 2
+
+r3 <- run_power(d, g3, n_sim = 4000, seed = 3026, verbose = FALSE)
+half <- nrow(T3)
+
+kable(data.frame(
+  Control = sprintf("%.0f%%", T3$control * 100),
+  Active  = sprintf("%.0f%%", T3$active * 100),
+  `Diff (pp)` = T3$diff * 100,
+  `Rural (333/arm)` = sprintf("%.3f", r3$power[1:half]),
+  `Urban (667/arm)` = sprintf("%.3f", r3$power[(half + 1):(2 * half)]),
+  check.names = FALSE
+), caption = "Within-subgroup power at the budget, alpha = 0.025.")
+```
+
+```{r t3-plot, echo = FALSE}
+library(ggplot2)
+pd <- rbind(
+  data.frame(T3, power = r3$power[1:half],                  subgroup = "Rural (333/arm)"),
+  data.frame(T3, power = r3$power[(half + 1):(2 * half)],   subgroup = "Urban (667/arm)")
+)
+ggplot(pd, aes(diff * 100, power, colour = factor(control * 100), group = control)) +
+  geom_hline(yintercept = 0.80, linetype = 2, colour = "grey40") +
+  geom_line() + geom_point(size = 1.2) +
+  facet_wrap(~subgroup) +
+  scale_y_continuous(limits = c(0, 1)) +
+  labs(x = "Absolute difference vs. control (percentage points)",
+       y = "Power", colour = "Control\nevent rate (%)",
+       caption = "Dashed line = 80% power. alpha = 0.025.") +
+  theme_minimal(base_size = 11)
+```
+
+## Minimum detectable effect
+
+The single number the LOI actually needs.
+
+```{r mde}
+mde <- function(n, p0, alpha, target = 0.80) {
+  uniroot(function(dd) power.prop.test(n, p0, p0 + dd, alpha)$power - target,
+          c(0.005, 0.40))$root
+}
+grid <- expand.grid(control = controls,
+                    Group = c("Full arm (1000)", "Rural (333)", "Urban (667)"))
+grid$n <- c(n_arm, n_rural, n_urban)[as.integer(grid$Group)]
+grid$mde_pp <- mapply(function(n, p0) mde(n, p0, 0.025) * 100, grid$n, grid$control)
+
+kable(reshape(
+  data.frame(Control = sprintf("%.0f%%", grid$control * 100),
+             Group = as.character(grid$Group),
+             MDE = sprintf("%.1f", grid$mde_pp)),
+  idvar = "Control", timevar = "Group", direction = "wide"),
+  row.names = FALSE,
+  col.names = c("Control rate", "Full arm (1000)", "Rural (333)", "Urban (667)"),
+  caption = "Minimum detectable difference (percentage points) at 80% power, alpha = 0.025.")
+```
+
+## Headline for the LOI
+
+```{r headline, echo = FALSE, results = "asis"}
+m_full  <- mde(n_arm,  0.40, 0.025) * 100
+m_rural <- mde(n_rural, 0.40, 0.025) * 100
+m_urban <- mde(n_urban, 0.40, 0.025) * 100
+cat(sprintf(
+"> With 3000 participants randomised 1:1:1, each active-vs-control comparison has 80%% power to detect an absolute difference of **%.1f percentage points** against a 40%% control event rate (two-sided alpha = 0.025, Bonferroni-adjusted for two primary comparisons). Within the prespecified subgroups, the corresponding minimum detectable differences are **%.1f pp** in the urban stratum (667/arm) and **%.1f pp** in the rural stratum (333/arm).\n",
+m_full, m_urban, m_rural))
+```
+
+## Notes for reuse
+
+- **Unequal allocation.** Pass `n_per_arm = c(n1, n2, n3)`; the exact power
+  routine handles unequal arms directly.
+- **If the outcome is clustered** (sites, clinicians), switch to
+  `design_binary_cluster()` and supply an ICC — see the ICC column in the
+  [index](../../README.md).
+- **Non-inferiority or a different test.** `test = "fisher"` or
+  `test = "logistic"` swap the analysis without touching the DGP.
+- The exact-enumeration check (`check_against_analytic`) costs almost nothing
+  at these sample sizes. Run it whenever the DGP changes.
+
+```{r session, echo = FALSE}
+sessionInfo()$R.version$version.string
+```

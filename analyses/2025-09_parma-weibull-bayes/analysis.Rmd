@@ -1,0 +1,286 @@
+---
+title: "PARMA — Bayesian power for a Weibull time-to-event endpoint"
+subtitle: "Time to resolution of hypoxemia, high vs. low driving pressure in pediatric ARDS"
+author: "Zhe Chen, with Nadir Yehya"
+date: "September 2025 (ported into the power library, September 2026)"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    df_print: kable
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 8, fig.height = 4.5)
+source("../../R/load.R")
+library(knitr); library(ggplot2)
+```
+
+## The question
+
+PARMA randomises **160** children with ARDS to a high vs. low driving pressure
+ventilation strategy. The primary endpoint is **time to resolution of
+hypoxemia** (alive with PaO₂/FiO₂ > 300 on two measurements four hours apart),
+followed for **28 days**. Death acts as a **competing event**.
+
+Because the event here is a *good* one, a hazard ratio **greater than 1** is
+benefit: the treated arm resolves sooner.
+
+Inference is Bayesian, and the design question is correspondingly not "will
+p < 0.05" but:
+
+> How often would this trial produce a posterior probability of benefit,
+> `Pr(HR > 1 | data)`, above 0.90?
+
+That frequency **is** the power. In this library it is the same
+`run_power()` call as any frequentist design — the only thing that changes is
+what the design's `analyze()` returns as `reject`.
+
+```{r design}
+d <- design_weibull_bayes()
+d
+```
+
+## Data-generating model
+
+Event times are Weibull. The control arm is calibrated to empirical CHOP data;
+the treated arm shifts it by the target log hazard ratio.
+
+```{r dgp-params}
+pars <- design_params(d,
+  n              = 160,
+  beta           = log(1.6),   # target log HR (benefit)
+  shape_event    = 0.9,
+  scale_event    = 4,
+  competing_dist = "exp",
+  scale_comp     = 21,         # mean time to the competing event (death)
+  horizon        = 28,
+  threshold      = 0.90
+)
+
+ctrl <- weibull_control_summary(pars$scale_event, pars$shape_event)
+trt_scale <- weibull_scale_for_arm(pars$scale_event, pars$shape_event, pars$beta, 1)
+trt  <- weibull_control_summary(trt_scale, pars$shape_event)
+
+kable(data.frame(
+  Arm    = c("Control", "High driving pressure"),
+  `Weibull scale` = sprintf("%.2f", c(pars$scale_event, trt_scale)),
+  `Mean time to resolution (days)`   = sprintf("%.1f", c(ctrl["mean"],   trt["mean"])),
+  `Median time to resolution (days)` = sprintf("%.1f", c(ctrl["median"], trt["median"])),
+  check.names = FALSE
+), caption = "Implied control and treated arms. Shape = 0.9, true HR = 1.6.")
+```
+
+### The parameterisation, written down once
+
+This is the step that quietly breaks these simulations, so it lives in one
+function and is stated explicitly here.
+
+R's `rweibull(shape = a, scale = b)` has $S(t) = \exp\{-(t/b)^a\}$.
+JAGS's `dweib(alpha, lambda)` has $S(t) = \exp\{-\lambda t^{\alpha}\}$.
+They match with $\alpha = a$ and $\lambda = b^{-a}$. Proportional hazards with
+log-HR $\beta$ therefore requires
+
+$$b_{\text{trt}} = b_{\text{ctrl}} \cdot e^{-\beta / a},$$
+
+which is `weibull_scale_for_arm()`. The consequence of the exponent is that the
+baseline intercept on the JAGS scale is $\beta_0 = -a \log b_{\text{ctrl}}$:
+
+```{r beta0}
+sprintf("beta0 implied by the data-generating control arm: %.3f",
+        weibull_beta0_true(pars$scale_event, pars$shape_event))
+```
+
+That matters below, because the baseline prior is centred on it.
+
+### Verifying the DGP hits the intended effect
+
+Before powering anything, confirm the simulator produces the hazard ratio it
+was asked for. Fit a Cox model to one very large simulated trial:
+
+```{r dgp-check, cache = TRUE}
+set.seed(1)
+big <- d$dgp(design_params(d, n = 200000))
+cf  <- summary(survival::coxph(survival::Surv(time, status) ~ trt, data = big))$coefficients
+sprintf("target log HR = %.4f | Cox estimate on n = 200,000: %.4f (SE %.4f) | event fraction %.3f",
+        log(1.6), cf["trt", "coef"], cf["trt", "se(coef)"], mean(big$status))
+```
+
+```{r dgp-plot, echo = FALSE, fig.height = 4}
+set.seed(2)
+one <- d$dgp(pars)
+km  <- survival::survfit(survival::Surv(time, status) ~ trt, data = one)
+plot(km, col = c("#4C6EF5", "#E8590C"), lwd = 2, xlab = "Days since randomisation",
+     ylab = "Proportion with unresolved hypoxemia", mark.time = TRUE)
+legend("topright", c("Low driving pressure (control)", "High driving pressure"),
+       col = c("#4C6EF5", "#E8590C"), lwd = 2, bty = "n")
+title("One simulated PARMA trial (n = 160)")
+```
+
+## Analysis model
+
+```{r jags-model, echo = FALSE, comment = ""}
+cat(readLines(powerlib_path("jags", "weibull_ph.jags")), sep = "\n")
+```
+
+Note that `N` and every prior hyperparameter arrive as data. The original
+version of this model hard-coded `for(i in 1:160)`, which meant a new file per
+sample size; making them data is what lets the same file serve the sensitivity
+analyses below.
+
+Priors, as in the original analysis plan:
+
+| Parameter | Prior | Rationale |
+|---|---|---|
+| `beta.trt` | `dnorm(0, 0.2)` | Minimally informative, centred at **no effect** (HR = 1). Precision 0.2 = SD ≈ 2.24 on the log-HR scale. |
+| `beta0` | `dnorm(·, 0.5)` | Baseline hazard, moderately informative, centred on the control-arm value implied by the empirical data. |
+| `alpha` | `dgamma(1.1, 1.1)` | Weibull shape; mean 1, variance ≈ 0.91. |
+
+Centring `beta.trt` at zero is what makes the power calculation honest: the
+prior is not helping the trial find an effect.
+
+## Power
+
+```{r power-main, cache = TRUE}
+r <- run_power(d, data.frame(n = 160), n_sim = 1000, seed = 2026, verbose = FALSE)
+
+kable(data.frame(
+  Quantity = c("Power: Pr(HR > 1) >= 0.90",
+               "Pr(HR > 1) >= 0.90 against the *assumed true* HR of 1.6",
+               "95% credible interval excludes HR = 1",
+               "Mean posterior Pr(HR > 1)",
+               "Mean posterior log HR (truth = 0.470)",
+               "Mean event fraction by day 28"),
+  Value = sprintf("%.3f", c(r$power, r$reject_vs_truth, r$reject_ci95,
+                            r$prob_benefit, r$post_mean_beta, r$event_frac)),
+  `MC SE` = c(sprintf("%.3f", r$mc_se), rep("", 5)),
+  check.names = FALSE
+), caption = "1000 simulated trials, n = 160, true HR = 1.6.")
+```
+
+The second row is what the original memo reported as a "type I error rate". It
+is the same decision rule applied against the *assumed true* effect rather than
+the null — how often the trial would claim more benefit than was actually built
+in. It is a useful calibration diagnostic, but it is **not** a frequentist type
+I error rate, and it should be described as what it is when it appears in a
+protocol.
+
+### Reproducing the original memo
+
+The original PARMA submission quoted 93% power at a type I error of 0.101,
+using a baseline prior fixed at `dnorm(-1.6, 0.5)`. The ported pipeline
+reproduces it:
+
+```{r repro, cache = TRUE}
+rep <- run_power(d, data.frame(
+    label = c("This port (beta0 centred on the DGP)",
+              "Original memo (beta0 ~ dnorm(-1.6, 0.5))"),
+    center_beta0_at_truth = c(TRUE, FALSE),
+    prior_beta0_mean      = c(NA, -1.6)),
+  n_sim = 1000, seed = 2026, verbose = FALSE)
+
+kable(data.frame(
+  Configuration = rep$label,
+  Power = sprintf("%.3f (SE %.3f)", rep$power, rep$mc_se),
+  `"Type I error"` = sprintf("%.3f", rep$reject_vs_truth),
+  check.names = FALSE
+), caption = "Memo quoted 93% power and type I error 0.101.")
+```
+
+## Sensitivity: sample size and effect size
+
+```{r grid, cache = TRUE}
+g <- expand.grid(n = c(120, 140, 160, 180, 200, 240),
+                 beta = log(c(1.4, 1.6, 1.8)))
+rg <- run_power(d, g, n_sim = 500, seed = 4026, verbose = FALSE)
+rg$HR <- exp(rg$beta)
+```
+
+```{r grid-plot, echo = FALSE}
+ggplot(rg, aes(n, power, colour = factor(round(HR, 1)))) +
+  geom_hline(yintercept = c(0.80, 0.90), linetype = 2, colour = "grey50") +
+  geom_ribbon(aes(ymin = power_lo, ymax = power_hi, fill = factor(round(HR, 1))),
+              alpha = 0.15, colour = NA) +
+  geom_line(linewidth = 0.8) + geom_point() +
+  scale_y_continuous(limits = c(0, 1)) +
+  labs(x = "Total sample size", y = "Pr( Pr(HR > 1 | data) >= 0.90 )",
+       colour = "True HR", fill = "True HR",
+       caption = "500 simulations per point; ribbon = Monte Carlo 95% interval.") +
+  theme_minimal(base_size = 11)
+```
+
+```{r grid-table, echo = FALSE}
+w <- reshape(data.frame(n = rg$n, HR = sprintf("HR = %.1f", rg$HR),
+                        power = sprintf("%.2f", rg$power)),
+             idvar = "n", timevar = "HR", direction = "wide")
+names(w) <- sub("^power\\.", "", names(w))
+kable(w, row.names = FALSE, caption = "Bayesian power by sample size and true HR.")
+```
+
+## Sensitivity: the prior on the treatment effect
+
+The one assumption a reviewer will press on. Precision 0.2 is the pre-specified
+minimally informative choice; the others bracket it.
+
+```{r prior-sens, cache = TRUE}
+rp <- run_power(d, data.frame(prior_trt_prec = c(0.05, 0.2, 1, 4)),
+                n_sim = 500, seed = 5026, verbose = FALSE)
+rp$prior_sd <- 1 / sqrt(rp$prior_trt_prec)
+
+kable(data.frame(
+  `Prior precision` = rp$prior_trt_prec,
+  `Prior SD (log HR)` = sprintf("%.2f", rp$prior_sd),
+  Power = sprintf("%.3f", rp$power),
+  `Mean posterior log HR` = sprintf("%.3f", rp$post_mean_beta),
+  `Shrinkage vs. truth (0.470)` = sprintf("%+.3f", rp$post_mean_beta - log(1.6)),
+  check.names = FALSE
+), caption = "Effect of the treatment-effect prior. All centred at HR = 1.")
+```
+
+A tighter prior centred on the null shrinks the posterior toward no effect and
+costs power — which is the expected direction, and worth showing rather than
+asserting.
+
+## Frequentist comparator on identical data
+
+`design_weibull_cox()` shares the same DGP function, so any difference in power
+is attributable to the analysis model and not to a differently simulated trial.
+
+```{r cox, cache = TRUE}
+rc <- run_power(design_weibull_cox(), data.frame(n = c(120, 160, 200)),
+                n_sim = 1000, seed = 6026, verbose = FALSE)
+rb <- run_power(d, data.frame(n = c(120, 160, 200)),
+                n_sim = 1000, seed = 6026, verbose = FALSE)
+
+kable(data.frame(
+  `Total n` = rc$n,
+  `Bayesian: Pr(HR>1) >= 0.90` = sprintf("%.3f", rb$power),
+  `Bayesian: 95% CrI excludes 1` = sprintf("%.3f", rb$reject_ci95),
+  `Cox: p < 0.05 (two-sided)` = sprintf("%.3f", rc$power),
+  check.names = FALSE
+), caption = "Same simulated trials, three decision rules.")
+```
+
+The one-sided 0.90 posterior bar is a materially easier threshold than a
+two-sided 5% test — the gap between columns two and four is the design
+decision, not a modelling artefact, and it should be presented to the DSMB as
+such.
+
+## Notes for reuse
+
+- **Different endpoint direction.** If the event is *bad* (death, readmission),
+  benefit is HR < 1: flip the sign of `beta` and read `reject` as
+  `Pr(HR < 1) >= threshold` by negating `beta.trt`.
+- **Different competing-risk structure.** `competing_dist = "weibull"` with
+  `shape_comp`/`scale_comp`, or `"none"` to switch it off.
+- **Exponential or piecewise baseline.** The exponential case is
+  `alpha` fixed at 1; a piecewise model needs a new `.jags` file but the same
+  `analyze()` skeleton.
+- **Runtime.** 1000 replicates × one JAGS chain of 5000 iterations is a few
+  minutes on 8 cores. Drop `n_iter` while exploring, raise it for the number
+  that goes in the application.
+
+```{r session, echo = FALSE}
+sessionInfo()$R.version$version.string
+```
