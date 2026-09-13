@@ -195,9 +195,28 @@ run_power <- function(design, grid = NULL, n_sim = 1000,
   out
 }
 
+#' Wilson interval for the simulated power
+#'
+#' Used instead of the Wald interval because power estimates near 0 or 1 are
+#' exactly where check_against_analytic() gets used, and there the Wald
+#' interval collapses to a point and would reject a correct design.
+wilson_ci <- function(p, n, z = 1.96) {
+  if (!is.finite(p) || n <= 0) return(c(NA_real_, NA_real_))
+  d      <- 1 + z^2 / n
+  centre <- (p + z^2 / (2 * n)) / d
+  half   <- z / d * sqrt(p * (1 - p) / n + z^2 / (4 * n^2))
+  c(max(0, centre - half), min(1, centre + half))
+}
+
 ## Collapse the replicate list into one summary row.
 summarise_reps <- function(reps, n_sim) {
-  ok <- !vapply(reps, function(x) all(is.na(x)), logical(1))
+  # A replicate counts as failed if it errored *or* if it came back with a
+  # non-finite `reject`. Averaging with na.rm would otherwise quietly drop
+  # non-converged fits, which flatters exactly the scenarios that struggle.
+  ok <- vapply(reps, function(x) {
+    r <- suppressWarnings(as.numeric(x["reject"]))
+    length(r) == 1L && !is.na(r) && is.finite(r)
+  }, logical(1))
   n_failed <- sum(!ok)
   if (!any(ok)) {
     return(tibble::tibble(power = NA_real_, mc_se = NA_real_,
@@ -216,15 +235,17 @@ summarise_reps <- function(reps, n_sim) {
 
   means <- rowMeans(mat, na.rm = TRUE)
   power <- unname(means["reject"])
+  n_ok  <- sum(ok)
   # MC SE of a proportion; the engine's own precision, not the trial's.
-  mc_se <- sqrt(power * (1 - power) / sum(ok))
+  mc_se <- sqrt(power * (1 - power) / n_ok)
+  ci    <- wilson_ci(power, n_ok)
 
   extra <- means[setdiff(nms, "reject")]
   out <- tibble::tibble(
     power    = power,
     mc_se    = mc_se,
-    power_lo = max(0, power - 1.96 * mc_se),
-    power_hi = min(1, power + 1.96 * mc_se),
+    power_lo = ci[1],
+    power_hi = ci[2],
     n_sim    = n_sim,
     n_failed = n_failed
   )

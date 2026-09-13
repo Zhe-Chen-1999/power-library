@@ -72,6 +72,12 @@ kable(data.frame(
 ), caption = "Implied control and treated arms. Shape = 0.9, true HR = 1.6.")
 ```
 
+```{r dgp-note, echo = FALSE, results = "asis"}
+cat(sprintf(
+"**Worth flagging.** The original PARMA analysis plan describes these as mean times to resolution of \"approximately 5 days in the control arm and 3 days in the intervention arm\". The parameters it actually simulates (shape %.1f, scale %.0f) imply **%.1f** and **%.1f** days. The hazard ratio -- which is what the power calculation depends on -- is exactly the intended %.1f either way, so the reported power is unaffected. But the prose and the code disagree, and a control scale of about 4.75 rather than 4 would be needed to make the 5-day description literally true. Worth reconciling before this text is reused in a resubmission.\n",
+pars$shape_event, pars$scale_event, ctrl["mean"], trt["mean"], exp(pars$beta)))
+```
+
 ### The parameterisation, written down once
 
 This is the step that quietly breaks these simulations, so it lives in one
@@ -144,7 +150,9 @@ prior is not helping the trial find an effect.
 
 ```{r power-main, cache = TRUE}
 r <- run_power(d, data.frame(n = 160), n_sim = 1000, seed = 2026, verbose = FALSE)
+```
 
+```{r power-main-table, echo = FALSE}
 kable(data.frame(
   Quantity = c("Power: Pr(HR > 1) >= 0.90",
                "Pr(HR > 1) >= 0.90 against the *assumed true* HR of 1.6",
@@ -173,17 +181,19 @@ using a baseline prior fixed at `dnorm(-1.6, 0.5)`. The ported pipeline
 reproduces it:
 
 ```{r repro, cache = TRUE}
-rep <- run_power(d, data.frame(
+r_repro <- run_power(d, data.frame(
     label = c("This port (beta0 centred on the DGP)",
               "Original memo (beta0 ~ dnorm(-1.6, 0.5))"),
     center_beta0_at_truth = c(TRUE, FALSE),
     prior_beta0_mean      = c(NA, -1.6)),
   n_sim = 1000, seed = 2026, verbose = FALSE)
+```
 
+```{r repro-table, echo = FALSE}
 kable(data.frame(
-  Configuration = rep$label,
-  Power = sprintf("%.3f (SE %.3f)", rep$power, rep$mc_se),
-  `"Type I error"` = sprintf("%.3f", rep$reject_vs_truth),
+  Configuration = r_repro$label,
+  Power = sprintf("%.3f (SE %.3f)", r_repro$power, r_repro$mc_se),
+  `"Type I error"` = sprintf("%.3f", r_repro$reject_vs_truth),
   check.names = FALSE
 ), caption = "Memo quoted 93% power and type I error 0.101.")
 ```
@@ -227,20 +237,30 @@ minimally informative choice; the others bracket it.
 rp <- run_power(d, data.frame(prior_trt_prec = c(0.05, 0.2, 1, 4)),
                 n_sim = 500, seed = 5026, verbose = FALSE)
 rp$prior_sd <- 1 / sqrt(rp$prior_trt_prec)
+```
 
+```{r prior-sens-table, echo = FALSE}
 kable(data.frame(
   `Prior precision` = rp$prior_trt_prec,
   `Prior SD (log HR)` = sprintf("%.2f", rp$prior_sd),
   Power = sprintf("%.3f", rp$power),
+  `MC SE` = sprintf("%.3f", rp$mc_se),
   `Mean posterior log HR` = sprintf("%.3f", rp$post_mean_beta),
   `Shrinkage vs. truth (0.470)` = sprintf("%+.3f", rp$post_mean_beta - log(1.6)),
   check.names = FALSE
 ), caption = "Effect of the treatment-effect prior. All centred at HR = 1.")
 ```
 
-A tighter prior centred on the null shrinks the posterior toward no effect and
-costs power — which is the expected direction, and worth showing rather than
-asserting.
+```{r prior-sens-read, echo = FALSE, results = "asis"}
+i_tight <- which.max(rp$prior_trt_prec)     # the deliberately over-tight case
+rest    <- setdiff(seq_len(nrow(rp)), i_tight)
+cat(sprintf(
+"Read this as a *negative* result, which is the useful kind here. Across the three settings anyone would actually pre-specify -- prior SD %.2f, %.2f and %.2f on the log-HR scale -- power spans only %.3f, against a Monte Carlo SE of about %.3f on each estimate. Those three are indistinguishable; the design is not sensitive to the prior over that range, and the ordering between them is noise rather than signal.\n\nShrinkage only bites at the fourth setting, precision %.0f (prior SD %.2f), where the posterior mean falls from the true %.3f to %.3f and power to %.3f. A prior that tight is comparable in width to the effect being estimated, so it would be a strange thing to pre-specify. It is here to locate the boundary, not to recommend it.\n",
+rp$prior_sd[rest[1]], rp$prior_sd[rest[2]], rp$prior_sd[rest[3]],
+max(rp$power[rest]) - min(rp$power[rest]), mean(rp$mc_se),
+rp$prior_trt_prec[i_tight], rp$prior_sd[i_tight],
+log(1.6), rp$post_mean_beta[i_tight], rp$power[i_tight]))
+```
 
 ## Frequentist comparator on identical data
 
@@ -252,7 +272,9 @@ rc <- run_power(design_weibull_cox(), data.frame(n = c(120, 160, 200)),
                 n_sim = 1000, seed = 6026, verbose = FALSE)
 rb <- run_power(d, data.frame(n = c(120, 160, 200)),
                 n_sim = 1000, seed = 6026, verbose = FALSE)
+```
 
+```{r cox-table, echo = FALSE}
 kable(data.frame(
   `Total n` = rc$n,
   `Bayesian: Pr(HR>1) >= 0.90` = sprintf("%.3f", rb$power),
@@ -262,10 +284,13 @@ kable(data.frame(
 ), caption = "Same simulated trials, three decision rules.")
 ```
 
-The one-sided 0.90 posterior bar is a materially easier threshold than a
-two-sided 5% test — the gap between columns two and four is the design
-decision, not a modelling artefact, and it should be presented to the DSMB as
-such.
+```{r cox-read, echo = FALSE, results = "asis"}
+i <- which(rc$n == 160)
+cat(sprintf(
+"Two things to take from this. First, columns three and four agree closely -- at n = 160, %.3f against %.3f. That is the expected result and it is worth stating: with a treatment-effect prior this weak, a 95%% credible interval excluding the null behaves almost exactly like a two-sided 5%% test, so the Bayesian machinery is not smuggling in power through the back door. It is a useful internal consistency check on both implementations.\n\nSecond, the trial's actual decision rule -- a one-sided posterior probability above 0.90 -- gives %.3f, roughly %.0f points more. That gap is a deliberate design choice about how much evidence is required, not a modelling artefact, and it should be presented to reviewers and to the DSMB as such rather than compared silently against a conventional 5%% test.\n",
+rb$reject_ci95[i], rc$power[i], rb$power[i],
+100 * (rb$power[i] - rc$power[i])))
+```
 
 ## Notes for reuse
 

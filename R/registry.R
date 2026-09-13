@@ -82,9 +82,17 @@ registry_markdown <- function(path = registry_file()) {
   hdr <- c("Study", "Outcome", "Framework", "Arms", "Design", "Key design features", "Code")
   rows <- apply(tab, 1, function(r) {
     link <- if (nzchar(r[["path"]])) sprintf("[%s](%s)", basename(r[["path"]]), r[["path"]]) else ""
+    # Analyst and status ride along under the study name rather than as their
+    # own columns: you need both before reusing something (who to ask, and
+    # whether it was ever finished), but neither is what you scan the table
+    # for, and seven columns is already as wide as this reads well.
+    byline <- paste(c(r[["analyst"]], r[["status"]])[nzchar(c(r[["analyst"]], r[["status"]]))],
+                    collapse = " &middot; ")
+    study <- paste0("**", r[["study"]], "** (", r[["year"]], ")",
+                    "<br><sub>", r[["title"]], "</sub>",
+                    if (nzchar(byline)) paste0("<br><sub>", byline, "</sub>") else "")
     sprintf("| %s | %s | %s | %s | %s | %s | %s |",
-            paste0("**", r[["study"]], "** (", r[["year"]], ")<br><sub>", r[["title"]], "</sub>"),
-            r[["outcome"]], r[["framework"]], r[["n_arms"]], r[["design"]],
+            study, r[["outcome"]], r[["framework"]], r[["n_arms"]], r[["design"]],
             r[["features"]], link)
   })
 

@@ -1,0 +1,160 @@
+---
+title: "STUDY — power / sample size for the primary endpoint"
+subtitle: "One line on the design"
+author: "Your name"
+date: "Month Year"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    df_print: kable
+---
+
+<!--
+Copy this directory to analyses/YYYY-MM_study-slug/ and work through it.
+The headings are the ones a reviewer, a DSMB, or whoever inherits this in
+two years will look for, in roughly that order. Delete what doesn't apply,
+but think twice before deleting "Verify the DGP" or "Validation".
+
+When you're done:
+  source("../../R/load.R")
+  add_entry(id = "YYYY-MM_study-slug", title = ..., study = ..., ...)
+  build_index()
+-->
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 8, fig.height = 4.5)
+source("../../R/load.R")
+library(knitr); library(ggplot2)
+```
+
+## The question
+
+State, in plain sentences a clinician will read:
+
+- **Design**: how many arms, how randomised, what unit.
+- **Primary endpoint**: exactly as it will be defined in the protocol.
+- **Effect worth detecting**, and where that number came from (pilot data,
+  prior trial, clinical judgement — say which).
+- **Budget or constraint**: fixed N? fixed number of sites? fixed follow-up?
+- **Decision rule**: what counts as success. `p < 0.05`? A posterior
+  probability bar? A non-inferiority margin?
+- **Multiplicity**: how many comparisons are confirmatory, and what the
+  adjustment is.
+
+If a number here is a guess, say it is a guess. That is the assumption the
+sensitivity analysis below exists to stress.
+
+## Design
+
+```{r design}
+d <- design_binary_parallel()   # or whichever design_*() fits; see ../../README.md
+d
+```
+
+If no existing design fits, add a `design_*()` constructor to `R/` rather
+than defining the DGP inline here. Inline DGPs are how we ended up with a
+folder of unshareable scripts.
+
+```{r params}
+pars <- design_params(d,
+  # the assumed truth
+)
+```
+
+## Verify the DGP
+
+Confirm the simulator produces the effect it was asked for, *before*
+powering anything. One huge simulated trial, and recover the parameter:
+
+```{r dgp-check, cache = TRUE}
+set.seed(1)
+# big <- d$dgp(design_params(d, n = 200000))
+# ... estimate the effect from `big` and compare it to the assumed truth
+```
+
+This catches parameterisation slips — the failure mode where the simulation
+runs fine and cleanly powers the wrong effect size.
+
+## Primary power result
+
+```{r power, cache = TRUE}
+# r <- run_power(d, grid, n_sim = 2000, seed = 2026)
+```
+
+```{r power-table, echo = FALSE}
+# kable(...)  <- presentation goes in its OWN chunk
+```
+
+Two conventions worth keeping. Report `n_failed` and the Monte Carlo SE
+alongside the power, so it's clear how much of the last digit is real. And
+keep the `kable()` out of the cached chunk: if the table lives inside it,
+every wording change re-runs the simulation, which for a JAGS design means
+waiting twenty minutes to fix a typo.
+
+## Validation
+
+```{r validate, cache = TRUE}
+# check_against_analytic(d, grid, n_sim = 4000)
+```
+
+If the design has a closed form, check against it and show the comparison.
+If it doesn't, say so explicitly and name what you checked instead — a
+degenerate case, a limiting case, agreement with published numbers, or the
+type I error under the null:
+
+```{r null, cache = TRUE}
+# Type I error: same machinery, with the effect set to zero.
+# run_power(d, <grid with no effect>, n_sim = 8000)
+```
+
+## Sensitivity
+
+At minimum, vary the thing you were least sure about in "The question".
+Common candidates: the control-arm rate, the ICC, the effect size, the
+prior, the dropout rate, the accrual assumption.
+
+```{r sens, cache = TRUE}
+# rs <- run_power(d, expand.grid(...), n_sim = 1000, seed = 3026)
+```
+
+```{r sens-plot, echo = FALSE}
+# ggplot(rs, aes(x, power, colour = factor(z))) +
+#   geom_hline(yintercept = 0.80, linetype = 2, colour = "grey40") +
+#   geom_ribbon(aes(ymin = power_lo, ymax = power_hi, fill = factor(z)),
+#               alpha = 0.15, colour = NA) +
+#   geom_line() + geom_point() +
+#   scale_y_continuous(limits = c(0, 1)) +
+#   theme_minimal(base_size = 11)
+```
+
+## Headline
+
+The sentence that goes into the application, with every number filled in
+from the objects above rather than typed by hand — so it can't drift out of
+sync when the assumptions change.
+
+```{r headline, results = "asis", echo = FALSE}
+# cat(sprintf("> With N = %d ..., the trial has %.0f%% power to detect ...", n, 100 * r$power))
+```
+
+## Assumptions and limitations
+
+List them. The ones that are always worth a line:
+
+- Where the control-arm parameter came from.
+- Dropout / loss to follow-up, and whether it is in the simulation or
+  handled by inflating N afterwards.
+- Whether the analysis model in the simulation matches the one in the SAP.
+- Anything the simulation does *not* represent (site effects, interim
+  analyses, missing data, non-adherence).
+
+## Reproducibility
+
+```{r session, echo = FALSE}
+sessionInfo()$R.version$version.string
+```
+
+Seeds are set in every `run_power()` call above, so re-knitting reproduces
+these numbers exactly.

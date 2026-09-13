@@ -42,6 +42,10 @@ protocol decision, not a statistical one.
 d <- design_binary_parallel()
 d
 n_arm <- 1000   # 3000 total / 3 arms
+
+# Percentages, without rounding 37.5% to "38%" -- these tables are read
+# directly by clinicians choosing a row, so a half-point matters.
+pct <- function(x) paste0(trimws(formatC(x * 100, format = "fg", digits = 3)), "%")
 ```
 
 ## Table 1a — required n per arm, active vs. control
@@ -62,8 +66,8 @@ T1$n_a025  <- mapply(req_n, T1$control, T1$active, 0.025)
 T1$n_a0167 <- mapply(req_n, T1$control, T1$active, 0.05 / 3)
 
 kable(data.frame(
-  Control = sprintf("%.0f%%", T1$control * 100),
-  Active  = sprintf("%.0f%%", T1$active * 100),
+  Control = pct(T1$control),
+  Active  = pct(T1$active),
   `Difference (pp)` = T1$diff * 100,
   `n/arm, alpha = 0.025`  = T1$n_a025,
   `n/arm, alpha = 0.0167` = T1$n_a0167,
@@ -71,9 +75,14 @@ kable(data.frame(
 ), caption = "Required n per arm for 80% power, active vs. control.")
 ```
 
-These use `power.prop.test`, i.e. the normal approximation — the convention in
-protocols, and what a reviewer will reproduce if they check. The simulation
-below confirms it.
+These use `power.prop.test`, i.e. the normal approximation. That is deliberate:
+it is the convention in protocols and the number a reviewer will get if they
+check by hand. It is also mildly conservative — the exact power of the test is
+a little higher at these sample sizes — so the required *n* here errs on the
+safe side, which is the right direction for a sample size table.
+
+Table 1b below simulates the same design at the budget and compares it against
+the exact power, which is where the DGP actually gets validated.
 
 ## Table 1b — achieved power at the budget (1000/arm)
 
@@ -89,11 +98,13 @@ g1$alpha        <- 0.05
 g1$adjust       <- "bonferroni"
 g1$n_comparisons <- 2
 
-r1 <- check_against_analytic(d, g1, n_sim = 4000, seed = 2026, verbose = FALSE)
+r1 <- check_against_analytic(d, g1, n_sim = 20000, seed = 2026, verbose = FALSE)
+```
 
+```{r t1b-table, echo = FALSE}
 kable(data.frame(
-  Control = sprintf("%.0f%%", T1$control * 100),
-  Active  = sprintf("%.0f%%", T1$active * 100),
+  Control = pct(T1$control),
+  Active  = pct(T1$active),
   `Diff (pp)` = T1$diff * 100,
   `Power (simulated)` = sprintf("%.3f", r1$power),
   `MC SE` = sprintf("%.3f", r1$mc_se),
@@ -103,9 +114,14 @@ kable(data.frame(
 ), caption = "Power at 1000/arm, alpha = 0.025. Simulation vs. exact enumeration.")
 ```
 
-```{r t1b-check}
-sprintf("Scenarios where the exact value falls inside the simulation's MC interval: %d / %d (max |diff| = %.4f)",
-        sum(r1$within_mc), nrow(r1), max(r1$abs_diff))
+```{r t1b-check, echo = FALSE, results = "asis"}
+cat(sprintf(
+"At 20,000 replicates per scenario the Monte Carlo SE is about %.4f, which makes this a sharp test: the exact value falls inside the simulation's 95%% interval in **%d of %d** scenarios, and the largest absolute discrepancy anywhere in the table is %.4f.
+
+A 95%% interval is expected to miss about %.1f times in %d by chance alone, so %d outside is unremarkable; it would take several before the agreement looked suspect. The thing to check is that no scenario is off by a *practically* meaningful amount, and none is: %.4f on powers running from 0.5 to 0.99 would not move a single sample size decision. That is the evidence that the DGP, the test, and the Bonferroni adjustment are all doing what the table says they are.\n",
+mean(r1$mc_se), sum(r1$within_mc), nrow(r1), max(r1$abs_diff),
+0.05 * nrow(r1), nrow(r1), nrow(r1) - sum(r1$within_mc),
+max(r1$abs_diff)))
 ```
 
 ## Table 2 — active 1 vs. active 2
@@ -128,8 +144,8 @@ T2$pow_a0167 <- mapply(function(a, b) power.prop.test(n_arm, a, b, 0.05/3)$power
                        T2$active1, T2$active2)
 
 kable(data.frame(
-  `Active 1` = sprintf("%.0f%%", T2$active1 * 100),
-  `Active 2` = sprintf("%.0f%%", T2$active2 * 100),
+  `Active 1` = pct(T2$active1),
+  `Active 2` = pct(T2$active2),
   `Gap (pp)` = T2$gap * 100,
   `n/arm, alpha = 0.05`   = T2$n_a05,
   `n/arm, alpha = 0.0167` = T2$n_a0167,
@@ -163,10 +179,12 @@ g3$alpha <- 0.05; g3$adjust <- "bonferroni"; g3$n_comparisons <- 2
 
 r3 <- run_power(d, g3, n_sim = 4000, seed = 3026, verbose = FALSE)
 half <- nrow(T3)
+```
 
+```{r t3-table, echo = FALSE}
 kable(data.frame(
-  Control = sprintf("%.0f%%", T3$control * 100),
-  Active  = sprintf("%.0f%%", T3$active * 100),
+  Control = pct(T3$control),
+  Active  = pct(T3$active),
   `Diff (pp)` = T3$diff * 100,
   `Rural (333/arm)` = sprintf("%.3f", r3$power[1:half]),
   `Urban (667/arm)` = sprintf("%.3f", r3$power[(half + 1):(2 * half)]),
@@ -206,7 +224,7 @@ grid$n <- c(n_arm, n_rural, n_urban)[as.integer(grid$Group)]
 grid$mde_pp <- mapply(function(n, p0) mde(n, p0, 0.025) * 100, grid$n, grid$control)
 
 kable(reshape(
-  data.frame(Control = sprintf("%.0f%%", grid$control * 100),
+  data.frame(Control = pct(grid$control),
              Group = as.character(grid$Group),
              MDE = sprintf("%.1f", grid$mde_pp)),
   idvar = "Control", timevar = "Group", direction = "wide"),

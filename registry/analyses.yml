@@ -29,7 +29,7 @@ analyses:
     features: 'Two non-symmetric active arms; Bonferroni across 2 primary and 3 pairwise comparisons; prespecified subgroup power at a 1/3 vs 2/3 split; fixed N = 3000 budget'
     design_fn: binary_parallel
     path: analyses/2026-09_pcori-3arm-binary/analysis.Rmd
-    status: used-in-submission
+    status: final
 
   - id: 2025-09_parma-weibull-bayes
     title: Bayesian power to detect a >90% posterior probability of benefit in time to hypoxemia resolution

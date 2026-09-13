@@ -90,6 +90,21 @@ print(as.data.frame(rc[, c("n_clusters", "power", "mc_se", "power_analytic", "ab
 ok("within 0.06 of the design-effect approximation", all(rc$abs_diff < 0.06),
    sprintf("max |diff| = %.3f", max(rc$abs_diff)))
 
+cat("\n== 5b. unequal cluster sizes: mean and CV are as requested ==\n")
+set.seed(9)
+dv <- dc$dgp(design_params(dc, n_clusters = 3000, m = 30, m_varies = TRUE, m_cv = 0.5))
+sz <- as.numeric(table(dv$cluster))
+cat(sprintf("  target mean 30 / CV 0.50  ->  simulated mean %.1f / CV %.2f\n",
+            mean(sz), sd(sz) / mean(sz)))
+ok("mean cluster size within 5% of target", abs(mean(sz) - 30) / 30 < 0.05)
+ok("CV within 0.05 of target", abs(sd(sz) / mean(sz) - 0.5) < 0.05)
+ok("unequal sizes reduce power vs equal sizes at the same mean", {
+  re <- run_power(dc, data.frame(m_varies = c(FALSE, TRUE)), n_sim = 1500,
+                  seed = 106, verbose = FALSE)
+  cat(sprintf("  power: equal sizes %.3f, unequal sizes %.3f\n", re$power[1], re$power[2]))
+  re$power[2] <= re$power[1]
+})
+
 cat("\n== 6. Weibull DGP targets the intended hazard ratio ==\n")
 cat("   (the one place a parameterisation slip would silently change the\n")
 cat("    effect size being powered for)\n")
@@ -128,7 +143,32 @@ cat("\n== 8. failed replicates are counted, not silently dropped ==\n")
 dbad <- new_design("always_errors", dgp = function(p) data.frame(x = 1),
                    analyze = function(d, p) stop("boom"))
 rbad <- run_power(dbad, NULL, n_sim = 20, workers = 1, verbose = FALSE)
-ok("all 20 replicates reported as failed", rbad$n_failed == 20)
+ok("errored replicates reported as failed", rbad$n_failed == 20)
+
+# The subtler case: analyze() returns without erroring but `reject` is NA,
+# as a non-converged model would. Averaging with na.rm would hide these.
+dna <- new_design("half_na", dgp = function(p) data.frame(i = 1),
+                  analyze = function(d, p) {
+                    if (runif(1) < 0.5) c(reject = NA_real_, x = 1)
+                    else c(reject = 1, x = 1)
+                  })
+rna <- run_power(dna, NULL, n_sim = 400, seed = 55, workers = 1, verbose = FALSE)
+cat(sprintf("  n_failed = %d of 400, power = %.3f\n", rna$n_failed, rna$power))
+ok("NA rejections counted as failures, not dropped", rna$n_failed > 150)
+ok("power computed only over usable replicates", isTRUE(all.equal(rna$power, 1)))
+
+cat("\n== 8b. solve_n() finds the n where exact power crosses the target ==\n")
+n_sim_solve <- 3000
+n_hat <- solve_n(d, params = list(p = c(0.40, 0.55)), target = 0.80,
+                 n_range = c(50, 600), n_sim = n_sim_solve, tol = 4,
+                 seed = 33, verbose = FALSE)
+# Exact crossing point, by stepping the enumerated power
+n_true <- Find(function(n) power_two_props_exact(n, n, 0.55, 0.40, 0.05) >= 0.80,
+               50:600)
+cat(sprintf("  solve_n = %d (%d sims/step), exact crossing = %d\n",
+            n_hat, n_sim_solve, n_true))
+ok("solve_n within 15 of the exact crossing", abs(n_hat - n_true) <= 15,
+   sprintf("difference = %d", abs(n_hat - n_true)))
 
 cat("\n== 9. Bayesian Weibull: JAGS design runs and behaves sensibly ==\n")
 cat("   (small n_sim -- this is a smoke test, the real run is in analyses/)\n")

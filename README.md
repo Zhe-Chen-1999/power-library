@@ -19,8 +19,8 @@ Scan this to find the nearest precedent for a new project. Generated from
 
 | Study | Outcome | Framework | Arms | Design | Key design features | Code |
 |---|---|---|---|---|---|---|
-| **PCORI LOI** (2026)<br><sub>Sample size and power for a three-arm pragmatic trial, plus rural/urban subgroup power</sub> | Binary | frequentist | 3 | Parallel-arm RCT, individually randomised | Two non-symmetric active arms; Bonferroni across 2 primary and 3 pairwise comparisons; prespecified subgroup power at a 1/3 vs 2/3 split; fixed N = 3000 budget | [analysis.Rmd](analyses/2026-09_pcori-3arm-binary/analysis.Rmd) |
-| **PARMA (pediatric ARDS, high vs low driving pressure)** (2025)<br><sub>Bayesian power to detect a >90% posterior probability of benefit in time to hypoxemia resolution</sub> | Time-to-event | Bayesian | 2 | Parallel-arm RCT, Bayesian analysis | Weibull PH model in JAGS; death as competing event handled as cause-specific censoring; 28-day administrative censoring; posterior-probability decision rule; prior sensitivity on the treatment-effect precision | [analysis.Rmd](analyses/2025-09_parma-weibull-bayes/analysis.Rmd) |
+| **PCORI LOI** (2026)<br><sub>Sample size and power for a three-arm pragmatic trial, plus rural/urban subgroup power</sub><br><sub>Zhe Chen &middot; final</sub> | Binary | frequentist | 3 | Parallel-arm RCT, individually randomised | Two non-symmetric active arms; Bonferroni across 2 primary and 3 pairwise comparisons; prespecified subgroup power at a 1/3 vs 2/3 split; fixed N = 3000 budget | [analysis.Rmd](analyses/2026-09_pcori-3arm-binary/analysis.Rmd) |
+| **PARMA (pediatric ARDS, high vs low driving pressure)** (2025)<br><sub>Bayesian power to detect a >90% posterior probability of benefit in time to hypoxemia resolution</sub><br><sub>Zhe Chen, Nadir Yehya &middot; used-in-submission</sub> | Time-to-event | Bayesian | 2 | Parallel-arm RCT, Bayesian analysis | Weibull PH model in JAGS; death as competing event handled as cause-specific censoring; 28-day administrative censoring; posterior-probability decision rule; prior sensitivity on the treatment-effect precision | [analysis.Rmd](analyses/2025-09_parma-weibull-bayes/analysis.Rmd) |
 
 <!-- INDEX:END -->
 
@@ -79,12 +79,15 @@ of the same call as the power.
 |---|---|
 | `power` | proportion of replicates with `reject == 1` |
 | `mc_se`, `power_lo`, `power_hi` | Monte Carlo error of that estimate — the *simulation's* precision, not the trial's |
-| `n_sim`, `n_failed` | replicates attempted, and how many errored |
+| `n_sim`, `n_failed` | replicates attempted, and how many were unusable |
 | *(others)* | mean of every other quantity `analyze()` returned |
 
-`n_failed` matters. Failed replicates are counted and reported, never silently
-dropped — a design that only converges on the easy scenarios would otherwise
-look better than it is.
+`n_failed` matters, so check it. A replicate counts as failed if `analyze()`
+errored **or** if it returned without a usable `reject` — the case where a
+model didn't converge but didn't throw. Averaging those away with `na.rm`
+would flatter exactly the scenarios that struggle, which are the ones you most
+need to see. Power is computed over the usable replicates only, and the count
+of the rest is reported next to it.
 
 ## Validation
 
@@ -95,22 +98,41 @@ check_against_analytic(design_binary_parallel(),
                        data.frame(n_per_arm = c(150, 300)))
 ```
 
-For the binary designs the comparison is against the **exact** power, computed
-by enumerating every 2×2 table the trial could produce
+For `design_binary_parallel()` the comparison is against the **exact** power,
+computed by enumerating every 2×2 table the trial could produce
 (`power_two_props_exact()`) — not against `power.prop.test()`, which is a normal
-approximation and runs about 1–2 points conservative at moderate n. The exact
-value is the true power of the test the simulation actually performs, so
-agreement is a real correctness check rather than two approximations agreeing
-with each other.
+approximation and differs by up to ~2 percentage points at n = 150/arm (usually
+conservative; `tests/test_engine.R` prints the gap). The exact value is the true
+power of the test the simulation actually performs, so agreement is a real
+correctness check rather than two approximations agreeing with each other.
 
 `power_two_props_normal()` reproduces `power.prop.test()` when you want the
-conventional number for a protocol.
+conventional number for a protocol, and `analytic_method = "normal"` switches
+the design's check over to it.
+
+`design_binary_cluster()` has no exact counterpart, so its `analytic` is the
+standard design-effect inflation — a sanity check on the order of magnitude,
+not ground truth. Its DGP is validated separately by recovering the requested
+ICC and cluster-size CV from simulated data.
 
 Run the full suite:
 
 ```
 Rscript tests/test_engine.R
 ```
+
+## Runtime
+
+The binary designs are effectively free — thousands of replicates a second. The
+JAGS designs are not: one fit is ~60 ms, so a 1000-replicate scenario is about
+a minute on 8 cores, and the full PARMA analysis (roughly 17,000 fits across
+its sensitivity grids) takes about 22 minutes from a cold cache.
+
+Two things follow. Keep `cache = TRUE` on the expensive chunks, and keep the
+computation in a *different* chunk from the `kable()` that presents it —
+otherwise every wording tweak re-runs the simulation. And while exploring, drop
+`n_iter` and `n_sim`; raise them only for the numbers that go into the
+application. `mc_se` tells you when you've raised them enough.
 
 ## Layout
 
@@ -124,6 +146,7 @@ R/
 jags/
   weibull_ph.jags       Weibull PH model; N and priors passed as data
 analyses/
+  TEMPLATE.Rmd          starting point for a new analysis
   <year-month>_<slug>/  one directory per analysis, with analysis.Rmd
 registry/
   analyses.yml          the index, one entry per analysis
@@ -133,8 +156,11 @@ tests/
 
 ## Adding an analysis
 
-1. `mkdir analyses/2026-11_my-trial` and write `analysis.Rmd` there. Start from
-   whichever existing analysis is closest — that's what the index is for.
+1. `cp analyses/TEMPLATE.Rmd analyses/2026-11_my-trial/analysis.Rmd`, or start
+   from whichever existing analysis is closest — that's what the index is for.
+   The template's headings are the ones a reviewer or a DSMB will look for,
+   including the two that are easiest to skip and most expensive to skip:
+   *verify the DGP* and *validation*.
 2. Source the library with `source("../../R/load.R")`.
 3. If the design is new, add a `design_*()` constructor to `R/` rather than
    defining it inline in the Rmd. That is the difference between a library and
@@ -181,10 +207,20 @@ analyses**. Each is a `design_*()` constructor away.
 R ≥ 4.4, and:
 
 ```r
-install.packages(c("future.apply", "tibble", "dplyr", "yaml",
-                   "lme4", "survival", "ggplot2", "knitr", "rmarkdown"))
-install.packages("rjags")   # requires JAGS: brew install jags
+# core -- needed to load the library at all
+install.packages(c("future.apply", "tibble", "dplyr", "yaml", "survival"))
+
+# optional, loaded only where used
+install.packages("lme4")                          # GLMM analysis of cluster trials
+install.packages("rjags")                         # Bayesian designs; needs JAGS:
+                                                  #   brew install jags
+install.packages(c("ggplot2", "knitr", "rmarkdown"))  # to run the analyses/
 ```
 
-`rjags` is only needed for the Bayesian survival designs; everything else loads
-without it.
+`rjags` and `lme4` are referenced with `::` at the point of use, so the library
+loads and the binary designs work on a machine without either. Asking for a
+design you can't run gives an error that says what to install.
+
+Rendering the analyses to HTML also needs `pandoc` (`brew install pandoc`);
+without it you can still execute an analysis end to end with
+`knitr::knit("analysis.Rmd")`.

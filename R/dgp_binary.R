@@ -13,9 +13,9 @@
 ## at the adjusted level.
 ## =====================================================================
 
-suppressPackageStartupMessages({
-  library(lme4)
-})
+## lme4 is only needed for the GLMM analysis option, and it is slow to
+## attach, so it is referenced with :: at the point of use rather than
+## loaded here. The default cluster-level t-test needs nothing extra.
 
 ## ---------------------------------------------------------------------
 ## shared helpers
@@ -69,8 +69,10 @@ test_two_props <- function(y1, y0, test = c("chisq", "fisher", "logistic")) {
 #' `test_two_props(test = "chisq")` actually performs, which is what makes
 #' it the right yardstick for validating the simulation.
 #'
-#' Falls back to the normal approximation above `max_n`, where the
-#' enumeration grid gets expensive and the two agree to ~1e-3 anyway.
+#' Falls back to the normal approximation above `max_n`, where the (n1+1) x
+#' (n0+1) enumeration grid gets expensive. That cutoff is safe because the
+#' gap between the two closes as n grows: it reaches ~0.019 at n = 150 but
+#' is under 0.001 by n = 2500, so nothing meaningful is lost by switching.
 power_two_props_exact <- function(n1, n0, p1, p0, alpha, max_n = 2500) {
   if (max(n1, n0) > max_n) return(power_two_props_normal(n1, n0, p1, p0, alpha))
   x1 <- 0:n1; x0 <- 0:n0
@@ -170,8 +172,10 @@ harmonic_n <- function(n) 2 / (1 / n[1] + 1 / n[2])
 
 #' @param p            vector of event probabilities, one per arm
 #' @param n_clusters   clusters per arm (scalar or vector)
-#' @param m            cluster size; scalar, or c(mean, cv) when
-#'                     `m_varies = TRUE` for unequal cluster sizes
+#' @param m            cluster size (mean size when `m_varies = TRUE`)
+#' @param m_varies     if TRUE, draw unequal cluster sizes
+#' @param m_cv         coefficient of variation of cluster size, used only
+#'                     when `m_varies = TRUE`
 #' @param icc          intracluster correlation on the proportion scale
 #' @param test         "cluster_ttest" (t-test on cluster proportions, the
 #'                     standard small-k CRT analysis) or "glmm"
@@ -225,6 +229,10 @@ design_binary_cluster <- function() {
           lme4::glmer(y ~ g + (1 | cluster), data = d, family = binomial,
                       control = lme4::glmerControl(calc.derivs = FALSE))))
         pv <- coef(summary(fit))["g", "Pr(>|z|)"]
+        # A GLMM that fails to produce a p-value is a failed replicate, not
+        # a non-rejection: error out so run_power() counts it in n_failed
+        # rather than averaging it away.
+        if (!is.finite(pv)) stop("glmer did not return a usable p-value")
       }
 
       y1 <- d$y[d$arm == i1]; y0 <- d$y[d$arm == i0]

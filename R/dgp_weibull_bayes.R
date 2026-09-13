@@ -18,20 +18,35 @@
 ##                         comparator, on identical data
 ## =====================================================================
 
-suppressPackageStartupMessages({
-  library(rjags)
-  library(coda)
-  library(survival)
-})
+suppressPackageStartupMessages(library(survival))
 
-## Resolved lazily so the path works whether the file is source()d from the
-## library root, from analyses/<name>/, or knitted by rmarkdown.
-jags_model_path <- function(params) {
-  if (!is.null(params$jags_file) && file.exists(params$jags_file)) return(params$jags_file)
-  cands <- c("jags/weibull_ph.jags", "../jags/weibull_ph.jags",
-             "../../jags/weibull_ph.jags")
+## rjags needs JAGS itself installed (brew install jags), which not everyone
+## has. Load it lazily so the rest of the library -- and the binary designs
+## in particular -- still work on a machine without it. The error then
+## arrives when you actually ask for a Bayesian design, and says what to do.
+require_rjags <- function() {
+  if (!requireNamespace("rjags", quietly = TRUE)) {
+    stop("design_weibull_bayes() needs the 'rjags' package and a JAGS install.\n",
+         "  macOS:  brew install jags && Rscript -e 'install.packages(\"rjags\")'",
+         call. = FALSE)
+  }
+}
+
+## Absolute path to a bundled JAGS model.
+##
+## Resolved in the parent process at design construction, not inside the
+## worker: parallel workers do not reliably inherit the working directory,
+## and a relative path that happens to work when knitting from
+## analyses/<name>/ would fail from anywhere else. The absolute string then
+## travels to each worker as an ordinary parameter.
+jags_model_path <- function(file = "weibull_ph.jags") {
+  if (exists("POWERLIB_ROOT", inherits = TRUE)) {
+    p <- file.path(get("POWERLIB_ROOT", inherits = TRUE), "jags", file)
+    if (file.exists(p)) return(normalizePath(p))
+  }
+  cands <- file.path(c("jags", "../jags", "../../jags"), file)
   hit <- cands[file.exists(cands)]
-  if (!length(hit)) stop("cannot locate weibull_ph.jags; pass jags_file = <path>")
+  if (!length(hit)) stop("cannot locate ", file, "; pass jags_file = <path>")
   normalizePath(hit[1])
 }
 
@@ -110,23 +125,31 @@ weibull_dgp <- function(params) {
 #' @param prior_*        JAGS hyperparameters; dnorm takes a *precision*
 #' @param center_beta0_at_truth  if TRUE, centre the baseline prior on the
 #'                       value implied by the DGP instead of a fixed number
+## DGP parameters shared by the Bayesian and frequentist versions, so the
+## two designs cannot drift apart in what they simulate.
+weibull_dgp_defaults <- function() {
+  list(
+    n = 160, p_treat = 0.5, beta = log(1.6),
+    shape_event = 0.9, scale_event = 4,
+    competing_dist = "exp", scale_comp = 21, shape_comp = 1,
+    horizon = 28
+  )
+}
+
 design_weibull_bayes <- function() {
+  require_rjags()
   new_design(
     name = "weibull_bayes",
 
-    defaults = list(
-      n = 160, p_treat = 0.5, beta = log(1.6),
-      shape_event = 0.9, scale_event = 4,
-      competing_dist = "exp", scale_comp = 21, shape_comp = 1,
-      horizon = 28,
+    defaults = c(weibull_dgp_defaults(), list(
       threshold = 0.90,
       prior_trt_mean = 0, prior_trt_prec = 0.2,
       prior_beta0_mean = NA, prior_beta0_prec = 0.5,
       center_beta0_at_truth = TRUE,
       prior_alpha_shape = 1.1, prior_alpha_rate = 1.1,
       n_adapt = 500, n_burn = 1000, n_iter = 5000,
-      jags_file = NULL
-    ),
+      jags_file = jags_model_path("weibull_ph.jags")
+    )),
 
     dgp = weibull_dgp,
 
@@ -136,14 +159,25 @@ design_weibull_bayes <- function() {
       # JAGS wants the event time as NA wherever the observation is
       # censored; dinterval() then samples it above t.cen.
       t <- ifelse(data$status == 1, data$time, NA_real_)
-      t_init <- ifelse(data$status == 0, data$t_cen + 1, NA_real_)
 
+      # horizon = Inf with no competing event gives an infinite censoring
+      # time. Nothing is censored in that case, but JAGS will not accept Inf
+      # in its data, so substitute a bound that is finite and never binding.
+      t_cen <- data$t_cen
+      if (any(!is.finite(t_cen))) t_cen[!is.finite(t_cen)] <- 10 * max(data$time)
+
+      t_init <- ifelse(data$status == 0, t_cen + 1, NA_real_)
+
+      # Centre the baseline prior on the value the DGP implies, unless an
+      # explicit mean is supplied. Overriding therefore needs *both*
+      # center_beta0_at_truth = FALSE and a value for prior_beta0_mean --
+      # clearing the flag alone leaves nothing to centre on.
       b0_mean <- if (isTRUE(params$center_beta0_at_truth) || is.na(params$prior_beta0_mean)) {
         weibull_beta0_true(params$scale_event, params$shape_event)
       } else params$prior_beta0_mean
 
       jdata <- list(
-        N = n, t = t, t.cen = data$t_cen, trt = data$trt,
+        N = n, t = t, t.cen = t_cen, trt = data$trt,
         is.censored = 1 - data$status,
         prior_beta0_mean  = b0_mean,
         prior_beta0_prec  = params$prior_beta0_prec,
@@ -154,7 +188,7 @@ design_weibull_bayes <- function() {
       )
       jinits <- list(list(t = t_init, beta0 = b0_mean, beta.trt = 0))
 
-      jm <- rjags::jags.model(jags_model_path(params), data = jdata,
+      jm <- rjags::jags.model(params$jags_file, data = jdata,
                               inits = jinits, n.chains = 1,
                               n.adapt = params$n_adapt, quiet = TRUE)
       update(jm, params$n_burn, progress.bar = "none")
@@ -165,7 +199,10 @@ design_weibull_bayes <- function() {
       post_alpha <- as.numeric(s[[1]][, "alpha"])
 
       p_benefit <- mean(post_beta > 0)
-      q <- quantile(post_beta, c(0.025, 0.5, 0.975))
+      # unname(): quantile() labels its result "2.5%"/"97.5%", and c() would
+      # paste those onto the element names, giving columns called
+      # `post_lo_beta.2.5%` downstream.
+      q <- unname(quantile(post_beta, c(0.025, 0.5, 0.975)))
 
       c(reject = as.numeric(p_benefit >= params$threshold),
         # Same rule applied against the *assumed true* effect: how often we
@@ -202,10 +239,9 @@ design_weibull_bayes <- function() {
 ## ---------------------------------------------------------------------
 
 design_weibull_cox <- function() {
-  d <- design_weibull_bayes()
   new_design(
     name = "weibull_cox",
-    defaults = c(d$defaults, list(alpha = 0.05)),
+    defaults = c(weibull_dgp_defaults(), list(alpha = 0.05)),
     dgp = weibull_dgp,
     analyze = function(data, params) {
       fit <- survival::coxph(survival::Surv(time, status) ~ trt, data = data)

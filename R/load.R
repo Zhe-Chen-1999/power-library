@@ -60,11 +60,16 @@ POWERLIB_DESIGNS <- list(
 )
 
 #' List the designs the library currently provides
+#'
+#' `available` is FALSE when a design's dependencies are missing (rjags/JAGS,
+#' typically) -- listing still works so you can see what exists.
 list_designs <- function() {
   do.call(rbind, lapply(names(POWERLIB_DESIGNS), function(nm) {
-    m <- POWERLIB_DESIGNS[[nm]]()$meta
-    data.frame(design_fn = nm, design = m$design %||% "",
-               outcome = m$outcome %||% "", features = m$features %||% "")
+    d <- tryCatch(POWERLIB_DESIGNS[[nm]](), error = function(e) NULL)
+    m <- if (is.null(d)) list() else d$meta
+    data.frame(design_fn = nm, available = !is.null(d),
+               design = m$design %||% "", outcome = m$outcome %||% "",
+               features = m$features %||% "")
   }))
 }
 
