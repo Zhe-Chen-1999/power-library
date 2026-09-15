@@ -246,7 +246,7 @@ T1$n_a025   <- mapply(req_n, T1$control, T1$active, alpha_2)
 T1$n_a0167  <- mapply(req_n, T1$control, T1$active, alpha_3)
 ```
 
-```{r t1a-table, echo = FALSE}
+```{r t1a-table, echo = TRUE}
 kable(data.frame(
   Control = pct(T1$control),
   Active  = pct(T1$active),
@@ -256,12 +256,6 @@ kable(data.frame(
   check.names = FALSE
 ), caption = "Required n per arm for 80% power, active vs. control.")
 ```
-
-These use `power.prop.test`, the normal approximation. That is deliberate: it is
-the convention in protocols and what a reviewer gets checking by hand. It is
-also mildly conservative — the exact power is slightly higher at these sample
-sizes — so the required *n* errs on the safe side, which is the right direction
-for a sample size table.
 
 ## Table 1b — achieved power at the budget (1000/arm)
 
