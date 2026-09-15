@@ -1,0 +1,296 @@
+---
+title: "STUDY — power for a binary primary outcome"
+subtitle: "Parallel-arm randomised trial"
+author: "Your name"
+date: "Month Year"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+<!--
+TEMPLATE — parallel-arm trial, binary outcome.
+
+Copy this file to analyses/YYYY-MM_your-slug/analysis.Rmd, then work through it
+top to bottom replacing the placeholder numbers. It runs as-is, so knit it once
+before you change anything and confirm you get output.
+
+Everything is in this file. Nothing is source()d from elsewhere, so you can read
+it start to finish and copy it somewhere else without dragging a library along.
+
+When you're done, add a row to the index table in ../../README.md.
+-->
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 8, fig.height = 4.5)
+library(future.apply)
+library(knitr)
+library(ggplot2)
+plan(multisession, workers = max(1, parallel::detectCores() - 1))
+```
+
+## The question
+
+Replace this with the design, in sentences a clinician will read:
+
+- **Design** — how many arms, how randomised, allocation ratio.
+- **Primary outcome** — exactly as the protocol will define it.
+- **Control event rate**, and where it came from (pilot, registry, prior trial,
+  clinical judgement — say which).
+- **Effect worth detecting**, and the same question about where it came from.
+- **Constraint** — fixed N? fixed sites? fixed recruitment window?
+- **Multiplicity** — how many comparisons are confirmatory, and the adjustment.
+
+If a number here is a guess, say so. Those are the ones the sensitivity analysis
+below exists to stress.
+
+## Assumptions
+
+Everything the simulation depends on, in one place, so a reader never has to
+hunt for a number.
+
+```{r params}
+p_control  <- 0.40    # control arm event rate
+p_treat    <- 0.55    # treatment arm event rate under the alternative
+n_per_arm  <- 200     # participants per arm
+alpha      <- 0.05    # family-wise two-sided level
+n_compare  <- 1       # confirmatory comparisons; >1 applies Bonferroni
+n_sim      <- 4000    # simulation replicates
+seed       <- 2026
+
+alpha_test <- alpha / n_compare   # the level each test actually uses
+```
+
+## Machinery
+
+Three small helpers. They are the only infrastructure in this document.
+
+```{r helpers}
+# One simulated trial: generate, analyse, return a named vector that MUST
+# contain `reject`. Anything else it returns is averaged and reported too.
+simulate_one <- function(p_control, p_treat, n_per_arm, alpha_test) {
+  y0 <- rbinom(n_per_arm, 1, p_control)
+  y1 <- rbinom(n_per_arm, 1, p_treat)
+
+  # Uncorrected two-sample test of proportions. A table with no events (or no
+  # non-events) in both arms gives 0/0; there is no evidence against the null
+  # there, so call it a non-rejection rather than letting NaN through.
+  pv <- suppressWarnings(
+    prop.test(c(sum(y1), sum(y0)), c(n_per_arm, n_per_arm), correct = FALSE)$p.value
+  )
+  if (!is.finite(pv)) pv <- 1
+
+  c(reject     = as.numeric(pv < alpha_test),
+    risk_diff  = mean(y1) - mean(y0))
+}
+
+# Replicate and average. `future.seed` takes an integer, which makes the result
+# reproducible no matter how many workers are used.
+run_sim <- function(n_sim, seed, sim_one) {
+  out <- future_lapply(seq_len(n_sim),
+                       function(i) tryCatch(sim_one(), error = function(e) NULL),
+                       future.seed = seed)
+  ok <- !vapply(out, is.null, logical(1))
+  est <- colMeans(do.call(rbind, out[ok]))
+  power <- unname(est[["reject"]])
+  ci <- wilson_ci(power, sum(ok))
+  c(as.list(est),
+    list(mc_se = sqrt(power * (1 - power) / sum(ok)),
+         lo = ci[1], hi = ci[2], n_failed = sum(!ok)))
+}
+
+# Wilson rather than Wald: at power near 0 or 1 the Wald interval collapses to
+# a point, which is exactly where the validation below needs it to be sane.
+wilson_ci <- function(p, n, z = 1.96) {
+  d <- 1 + z^2 / n
+  centre <- (p + z^2 / (2 * n)) / d
+  half   <- z / d * sqrt(p * (1 - p) / n + z^2 / (4 * n^2))
+  c(max(0, centre - half), min(1, centre + half))
+}
+```
+
+## Validation
+
+Before trusting any power number, check the simulation against a value computed
+a different way.
+
+For two proportions we can do better than an approximation: enumerate **every
+2×2 table the trial could produce**, and sum the probability of the ones that
+reject. That is the exact power of the test being simulated, so agreement is a
+real correctness check rather than two approximations agreeing with each other.
+
+```{r exact}
+# Exact power of the uncorrected two-proportion test, by enumeration.
+# Cost is (n1+1) x (n0+1), so keep it under a few thousand per arm.
+power_exact <- function(n1, n0, p1, p0, alpha) {
+  x1 <- 0:n1; x0 <- 0:n0
+  pbar <- outer(x1, x0, "+") / (n1 + n0)
+  se   <- sqrt(pbar * (1 - pbar) * (1 / n1 + 1 / n0))
+  z    <- outer(x1 / n1, x0 / n0, "-") / se
+  rej  <- is.finite(z) & abs(z) > qnorm(1 - alpha / 2)
+  sum(outer(dbinom(x1, n1, p1), dbinom(x0, n0, p0))[rej])
+}
+```
+
+```{r validate, cache = TRUE}
+check <- run_sim(n_sim, seed,
+                 function() simulate_one(p_control, p_treat, n_per_arm, alpha_test))
+exact <- power_exact(n_per_arm, n_per_arm, p_treat, p_control, alpha_test)
+```
+
+```{r validate-report, echo = FALSE, results = "asis"}
+cat(sprintf(
+"Simulated power **%.4f** (MC SE %.4f, 95%% interval %.4f–%.4f) against an exact
+value of **%.4f**. Difference %.4f, which %s inside the Monte Carlo interval.
+Failed replicates: %d.\n",
+check$reject, check$mc_se, check$lo, check$hi, exact,
+abs(check$reject - exact),
+if (exact >= check$lo && exact <= check$hi) "is" else "is *not*",
+check$n_failed))
+```
+
+A note on why this matters: `power.prop.test()` uses a normal approximation and
+runs up to about 0.02 conservative at n = 150 per arm. Validating against it
+cannot distinguish "the simulation is right" from "both approximations are wrong
+in the same direction". Use it for the conventional number a reviewer will
+reproduce by hand — not as the thing you check against.
+
+## Type I error
+
+The same machinery with no true effect. A simulation that cannot hold its
+nominal level is not measuring power.
+
+```{r null, cache = TRUE}
+null <- run_sim(n_sim, seed + 1,
+                function() simulate_one(p_control, p_control, n_per_arm, alpha_test))
+```
+
+```{r null-report, echo = FALSE, results = "asis"}
+cat(sprintf(
+"Empirical type I error **%.4f** (95%% interval %.4f–%.4f) against a nominal
+%.4f. The chi-square test on discrete data is not exactly its nominal level, so
+the exact size — %.4f — is the fairer target.\n",
+null$reject, null$lo, null$hi, alpha_test,
+power_exact(n_per_arm, n_per_arm, p_control, p_control, alpha_test)))
+```
+
+## Required sample size
+
+The conventional table, using the normal approximation because that is what
+protocols quote and what a reviewer will check by hand. It is mildly
+conservative, so the required *n* errs on the safe side.
+
+```{r required-n}
+req_n <- function(p0, p1, alpha, target = 0.80) {
+  ceiling(power.prop.test(p1 = p0, p2 = p1, sig.level = alpha,
+                          power = target, alternative = "two.sided")$n)
+}
+
+controls <- c(0.30, 0.40, 0.50)
+effects  <- c(0.05, 0.075, 0.10)
+grid <- expand.grid(control = controls, effect = effects)
+grid <- grid[order(grid$control, grid$effect), ]
+grid$treat <- grid$control + grid$effect
+grid$n     <- mapply(req_n, grid$control, grid$treat, alpha_test)
+
+pct <- function(x) paste0(trimws(formatC(x * 100, format = "fg", digits = 3)), "%")
+
+kable(data.frame(
+  Control = pct(grid$control),
+  Treatment = pct(grid$treat),
+  `Difference (pp)` = grid$effect * 100,
+  `n per arm` = grid$n,
+  check.names = FALSE
+), caption = sprintf("Required n per arm for 80%% power at alpha = %.4g.", alpha_test))
+```
+
+## Power across scenarios
+
+Vary whatever you were least sure about in "The question". Here it is the
+control rate and the effect size, at a fixed sample size.
+
+```{r sweep, cache = TRUE}
+sweep <- expand.grid(control = controls, effect = effects)
+sweep <- sweep[order(sweep$control, sweep$effect), ]
+sweep$treat <- sweep$control + sweep$effect
+
+sweep_res <- do.call(rbind, lapply(seq_len(nrow(sweep)), function(i) {
+  r <- run_sim(1000, seed + 100 + i,
+               function() simulate_one(sweep$control[i], sweep$treat[i],
+                                       n_per_arm, alpha_test))
+  data.frame(power = r$reject, lo = r$lo, hi = r$hi, mc_se = r$mc_se)
+}))
+sweep <- cbind(sweep, sweep_res)
+```
+
+```{r sweep-table, echo = FALSE}
+kable(data.frame(
+  Control = pct(sweep$control),
+  Treatment = pct(sweep$treat),
+  `Difference (pp)` = sweep$effect * 100,
+  Power = sprintf("%.3f", sweep$power),
+  `MC SE` = sprintf("%.3f", sweep$mc_se),
+  check.names = FALSE
+), caption = sprintf("Simulated power at %d per arm.", n_per_arm))
+```
+
+```{r sweep-plot, echo = FALSE}
+ggplot(sweep, aes(effect * 100, power, colour = factor(control * 100))) +
+  geom_hline(yintercept = 0.80, linetype = 2, colour = "grey45") +
+  geom_ribbon(aes(ymin = lo, ymax = hi, fill = factor(control * 100)),
+              alpha = 0.15, colour = NA) +
+  geom_line() + geom_point(size = 1.3) +
+  scale_y_continuous(limits = c(0, 1)) +
+  labs(x = "Absolute difference vs. control (percentage points)",
+       y = "Power", colour = "Control\nrate (%)", fill = "Control\nrate (%)",
+       caption = "Dashed line = 80% power. Ribbon = Monte Carlo 95% interval.") +
+  theme_minimal(base_size = 11)
+```
+
+## Minimum detectable effect
+
+The single number a grant application usually needs.
+
+```{r mde, echo = FALSE, results = "asis"}
+mde <- function(n, p0, alpha, target = 0.80) {
+  uniroot(function(d) power.prop.test(n, p0, p0 + d, alpha)$power - target,
+          c(0.005, 0.40))$root
+}
+cat(sprintf(
+"> With %d participants per arm, the trial has 80%% power to detect an absolute
+difference of **%.1f percentage points** against a %s control event rate
+(two-sided alpha = %.4g).\n",
+n_per_arm, mde(n_per_arm, p_control, alpha_test) * 100, pct(p_control), alpha_test))
+```
+
+## Assumptions and limitations
+
+Write these out — they are what a reviewer probes.
+
+- Where the control event rate came from.
+- Dropout and loss to follow-up: in the simulation, or handled by inflating N?
+- Whether the analysis simulated here matches the one in the SAP.
+- What the simulation does **not** represent — site effects, interim analyses,
+  missing outcomes, non-adherence.
+
+## Adapting this template
+
+- **More than two arms.** Generate a vector of arms and test the pair you care
+  about. Set `n_compare` to the number of confirmatory comparisons.
+- **Subgroup power.** Same code with a smaller `n_per_arm` — if a stratum is a
+  third of the trial, run it at a third of the arm size.
+- **Unequal allocation.** Give `simulate_one()` separate `n1` / `n0` and pass
+  both to `power_exact()`, which already accepts them.
+- **A different test.** Swap `prop.test()` for `fisher.test()` or a logistic
+  model. Note the exact enumeration above is specific to the uncorrected
+  chi-square test, so it stops being the right yardstick if you change this.
+
+## Reproducibility
+
+```{r session, echo = FALSE}
+sessionInfo()$R.version$version.string
+```
+
+Seeds are fixed in every call above, so re-knitting reproduces these numbers.

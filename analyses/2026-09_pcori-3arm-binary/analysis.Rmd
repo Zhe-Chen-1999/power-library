@@ -7,64 +7,123 @@ output:
   html_document:
     toc: true
     toc_float: true
-    df_print: kable
 ---
 
 ```{r setup, include = FALSE}
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
                       fig.width = 8, fig.height = 4.5)
-source("../../R/load.R")
+library(future.apply)
 library(knitr)
+library(ggplot2)
+plan(multisession, workers = max(1, parallel::detectCores() - 1))
 ```
+
+Started from `templates/binary-parallel.Rmd`. Self-contained — nothing is
+sourced from elsewhere.
 
 ## The question
 
-Three arms — one control, two *different* active interventions — with a fixed
-budget of **N = 3000**, so 1000 per arm. The clinicians need to read two things
-straight off a table:
+Three arms — one control and two **different** active interventions — with a
+fixed budget of **N = 3000**, so 1000 per arm. The clinicians need to read two
+things straight off a table:
 
 1. How large does an arm have to be to detect a given improvement over control?
-2. At the budget we actually have, what effect can we detect — overall, and
-   within the rural and urban subgroups?
+2. At the budget we actually have, what can we detect — overall, and within the
+   rural and urban subgroups?
 
 The two active arms are **not** assumed to have the same effect. Every table
-below varies one arm at a time, so a reader can pick the row matching whatever
-they believe about each intervention separately.
+varies one arm at a time, so a reader can pick the row matching whatever they
+believe about each intervention separately.
 
 ### Multiplicity
 
-Two primary comparisons (each active vs. control) → Bonferroni **α = 0.025**.
-Three pairwise comparisons, if the active-vs-active contrast is also treated as
-confirmatory → **α = 0.0167**. Both are shown throughout; which one applies is a
-protocol decision, not a statistical one.
+Two primary comparisons, each active against control → Bonferroni
+**α = 0.025**. If the active-versus-active contrast is also treated as
+confirmatory, three pairwise comparisons → **α = 0.0167**. Both appear below.
+Which one applies is a protocol decision, not a statistical one.
 
-```{r design}
-d <- design_binary_parallel()
-d
-n_arm <- 1000   # 3000 total / 3 arms
+## Assumptions
 
-# Percentages, without rounding 37.5% to "38%" -- these tables are read
-# directly by clinicians choosing a row, so a half-point matters.
-pct <- function(x) paste0(trimws(formatC(x * 100, format = "fg", digits = 3)), "%")
-```
+```{r params}
+n_arm      <- 1000          # budget: 3000 total across 3 arms
+alpha      <- 0.05
+alpha_2    <- alpha / 2     # 0.025  — two primary comparisons
+alpha_3    <- alpha / 3     # 0.0167 — three pairwise comparisons
+n_sim      <- 20000
+seed       <- 2026
 
-## Table 1a — required n per arm, active vs. control
+# The trial is 1/3 rural, 2/3 urban, so each arm contributes:
+n_rural <- round(n_arm / 3)       # 333
+n_urban <- round(n_arm * 2 / 3)   # 667
 
-```{r t1a}
 controls <- seq(0.30, 0.50, by = 0.05)
 diffs    <- c(0.050, 0.075, 0.100)
+```
+
+## Machinery
+
+```{r helpers}
+# One simulated two-arm comparison.
+simulate_one <- function(p_control, p_treat, n_per_arm, alpha_test) {
+  y0 <- rbinom(n_per_arm, 1, p_control)
+  y1 <- rbinom(n_per_arm, 1, p_treat)
+  pv <- suppressWarnings(
+    prop.test(c(sum(y1), sum(y0)), c(n_per_arm, n_per_arm), correct = FALSE)$p.value
+  )
+  if (!is.finite(pv)) pv <- 1      # degenerate table: no evidence, no rejection
+  c(reject = as.numeric(pv < alpha_test))
+}
+
+run_sim <- function(n_sim, seed, sim_one) {
+  out <- future_lapply(seq_len(n_sim),
+                       function(i) tryCatch(sim_one(), error = function(e) NULL),
+                       future.seed = seed)
+  ok <- !vapply(out, is.null, logical(1))
+  est <- colMeans(do.call(rbind, out[ok]))
+  power <- unname(est[["reject"]])
+  ci <- wilson_ci(power, sum(ok))
+  c(as.list(est), list(mc_se = sqrt(power * (1 - power) / sum(ok)),
+                       lo = ci[1], hi = ci[2], n_failed = sum(!ok)))
+}
+
+wilson_ci <- function(p, n, z = 1.96) {
+  d <- 1 + z^2 / n
+  centre <- (p + z^2 / (2 * n)) / d
+  half   <- z / d * sqrt(p * (1 - p) / n + z^2 / (4 * n^2))
+  c(max(0, centre - half), min(1, centre + half))
+}
+
+# Exact power of the test above, by enumerating every 2x2 table the trial
+# could produce. This is the yardstick the simulation is checked against.
+power_exact <- function(n1, n0, p1, p0, alpha) {
+  x1 <- 0:n1; x0 <- 0:n0
+  pbar <- outer(x1, x0, "+") / (n1 + n0)
+  se   <- sqrt(pbar * (1 - pbar) * (1 / n1 + 1 / n0))
+  z    <- outer(x1 / n1, x0 / n0, "-") / se
+  rej  <- is.finite(z) & abs(z) > qnorm(1 - alpha / 2)
+  sum(outer(dbinom(x1, n1, p1), dbinom(x0, n0, p0))[rej])
+}
 
 req_n <- function(p0, p1, alpha, target = 0.80) {
   ceiling(power.prop.test(p1 = p0, p2 = p1, sig.level = alpha,
                           power = target, alternative = "two.sided")$n)
 }
 
+# Percentages that don't round 37.5% to "38%" — these tables are read row by row.
+pct <- function(x) paste0(trimws(formatC(x * 100, format = "fg", digits = 3)), "%")
+```
+
+## Table 1a — required n per arm, active vs. control
+
+```{r t1a}
 T1 <- expand.grid(control = controls, diff = diffs)
 T1 <- T1[order(T1$control, T1$diff), ]
-T1$active <- T1$control + T1$diff
-T1$n_a025  <- mapply(req_n, T1$control, T1$active, 0.025)
-T1$n_a0167 <- mapply(req_n, T1$control, T1$active, 0.05 / 3)
+T1$active   <- T1$control + T1$diff
+T1$n_a025   <- mapply(req_n, T1$control, T1$active, alpha_2)
+T1$n_a0167  <- mapply(req_n, T1$control, T1$active, alpha_3)
+```
 
+```{r t1a-table, echo = FALSE}
 kable(data.frame(
   Control = pct(T1$control),
   Active  = pct(T1$active),
@@ -75,59 +134,65 @@ kable(data.frame(
 ), caption = "Required n per arm for 80% power, active vs. control.")
 ```
 
-These use `power.prop.test`, i.e. the normal approximation. That is deliberate:
-it is the convention in protocols and the number a reviewer will get if they
-check by hand. It is also mildly conservative — the exact power of the test is
-a little higher at these sample sizes — so the required *n* here errs on the
-safe side, which is the right direction for a sample size table.
-
-Table 1b below simulates the same design at the budget and compares it against
-the exact power, which is where the DGP actually gets validated.
+These use `power.prop.test`, the normal approximation. That is deliberate: it is
+the convention in protocols and what a reviewer gets checking by hand. It is
+also mildly conservative — the exact power is slightly higher at these sample
+sizes — so the required *n* errs on the safe side, which is the right direction
+for a sample size table.
 
 ## Table 1b — achieved power at the budget (1000/arm)
 
-Run through the library so the numbers are simulated end-to-end rather than
-read off a formula. The `power_analytic` column is the **exact** power of the
-test being simulated (enumerated over every possible 2×2 table), which is what
-makes the agreement meaningful.
+Simulated end to end, and checked against the exact power rather than against
+another approximation.
 
 ```{r t1b, cache = TRUE}
-g1 <- scenarios(p = lapply(seq_len(nrow(T1)), function(i) c(T1$control[i], T1$active[i])))
-g1$n_per_arm    <- n_arm
-g1$alpha        <- 0.05
-g1$adjust       <- "bonferroni"
-g1$n_comparisons <- 2
+T1b <- T1
+T1b$sim   <- NA_real_; T1b$mc_se <- NA_real_
+T1b$lo    <- NA_real_; T1b$hi    <- NA_real_
+T1b$exact <- NA_real_
 
-r1 <- check_against_analytic(d, g1, n_sim = 20000, seed = 2026, verbose = FALSE)
+for (i in seq_len(nrow(T1b))) {
+  r <- run_sim(n_sim, seed + i,
+               function() simulate_one(T1b$control[i], T1b$active[i], n_arm, alpha_2))
+  T1b$sim[i]   <- r$reject; T1b$mc_se[i] <- r$mc_se
+  T1b$lo[i]    <- r$lo;     T1b$hi[i]    <- r$hi
+  T1b$exact[i] <- power_exact(n_arm, n_arm, T1b$active[i], T1b$control[i], alpha_2)
+}
+T1b$within <- T1b$exact >= T1b$lo & T1b$exact <= T1b$hi
 ```
 
 ```{r t1b-table, echo = FALSE}
 kable(data.frame(
-  Control = pct(T1$control),
-  Active  = pct(T1$active),
-  `Diff (pp)` = T1$diff * 100,
-  `Power (simulated)` = sprintf("%.3f", r1$power),
-  `MC SE` = sprintf("%.3f", r1$mc_se),
-  `Power (exact)` = sprintf("%.3f", r1$power_analytic),
-  Agree = ifelse(r1$within_mc, "yes", "no"),
+  Control = pct(T1b$control),
+  Active  = pct(T1b$active),
+  `Diff (pp)` = T1b$diff * 100,
+  `Power (simulated)` = sprintf("%.3f", T1b$sim),
+  `MC SE` = sprintf("%.3f", T1b$mc_se),
+  `Power (exact)` = sprintf("%.3f", T1b$exact),
+  Agree = ifelse(T1b$within, "yes", "no"),
   check.names = FALSE
 ), caption = "Power at 1000/arm, alpha = 0.025. Simulation vs. exact enumeration.")
 ```
 
 ```{r t1b-check, echo = FALSE, results = "asis"}
 cat(sprintf(
-"At 20,000 replicates per scenario the Monte Carlo SE is about %.4f, which makes this a sharp test: the exact value falls inside the simulation's 95%% interval in **%d of %d** scenarios, and the largest absolute discrepancy anywhere in the table is %.4f.
+"At %s replicates per scenario the Monte Carlo SE is about %.4f, which makes
+this a sharp test: the exact value falls inside the simulation's 95%% interval
+in **%d of %d** scenarios, with a largest absolute discrepancy of %.4f.
 
-A 95%% interval is expected to miss about %.1f times in %d by chance alone, so %d outside is unremarkable; it would take several before the agreement looked suspect. The thing to check is that no scenario is off by a *practically* meaningful amount, and none is: %.4f on powers running from 0.5 to 0.99 would not move a single sample size decision. That is the evidence that the DGP, the test, and the Bonferroni adjustment are all doing what the table says they are.\n",
-mean(r1$mc_se), sum(r1$within_mc), nrow(r1), max(r1$abs_diff),
-0.05 * nrow(r1), nrow(r1), nrow(r1) - sum(r1$within_mc),
-max(r1$abs_diff)))
+A 95%% interval is expected to miss about %.1f times in %d by chance alone, so
+%d outside is unremarkable — it would take several before the agreement looked
+suspect. What matters is that nothing is off by a *practically* meaningful
+amount, and nothing is: %.4f on powers running from 0.5 to 0.99 would not move
+a single sample size decision.\n",
+format(n_sim, big.mark = ","), mean(T1b$mc_se), sum(T1b$within), nrow(T1b),
+max(abs(T1b$sim - T1b$exact)), 0.05 * nrow(T1b), nrow(T1b),
+nrow(T1b) - sum(T1b$within), max(abs(T1b$sim - T1b$exact))))
 ```
 
 ## Table 2 — active 1 vs. active 2
 
-The secondary/exploratory contrast. Gaps are smaller here, since both arms are
-active.
+The secondary contrast. Gaps are smaller here, since both arms are active.
 
 ```{r t2}
 active1s <- c(0.30, 0.35, 0.40, 0.45, 0.50)
@@ -135,14 +200,16 @@ gaps     <- c(0.030, 0.050, 0.075, 0.100)
 
 T2 <- expand.grid(active1 = active1s, gap = gaps)
 T2 <- T2[order(T2$active1, T2$gap), ]
-T2$active2 <- T2$active1 + T2$gap
-T2$n_a05   <- mapply(req_n, T2$active1, T2$active2, 0.05)
-T2$n_a0167 <- mapply(req_n, T2$active1, T2$active2, 0.05 / 3)
-T2$pow_a05   <- mapply(function(a, b) power.prop.test(n_arm, a, b, 0.05)$power,
+T2$active2   <- T2$active1 + T2$gap
+T2$n_a05     <- mapply(req_n, T2$active1, T2$active2, alpha)
+T2$n_a0167   <- mapply(req_n, T2$active1, T2$active2, alpha_3)
+T2$pow_a05   <- mapply(function(a, b) power.prop.test(n_arm, a, b, alpha)$power,
                        T2$active1, T2$active2)
-T2$pow_a0167 <- mapply(function(a, b) power.prop.test(n_arm, a, b, 0.05/3)$power,
+T2$pow_a0167 <- mapply(function(a, b) power.prop.test(n_arm, a, b, alpha_3)$power,
                        T2$active1, T2$active2)
+```
 
+```{r t2-table, echo = FALSE}
 kable(data.frame(
   `Active 1` = pct(T2$active1),
   `Active 2` = pct(T2$active2),
@@ -157,15 +224,10 @@ kable(data.frame(
 
 ## Table 3 — subgroup power
 
-The trial is 1/3 rural, 2/3 urban, so at the budget each arm contributes
-**333 rural** and **667 urban** participants. Subgroup power is just the same
-design at a smaller n — no new machinery needed, which is the point of keeping
-`n_per_arm` a parameter.
+At the budget each arm contributes **333 rural** and **667 urban** participants.
+Subgroup power is the same calculation at a smaller n — no new machinery.
 
 ```{r t3, cache = TRUE}
-n_rural <- round(n_arm / 3)      # 333
-n_urban <- round(n_arm * 2 / 3)  # 667
-
 baselines <- c(0.25, 0.30, 0.35, 0.40, 0.45, 0.50)
 effects   <- c(0.050, 0.075, 0.100, 0.125)
 
@@ -173,88 +235,99 @@ T3 <- expand.grid(control = baselines, diff = effects)
 T3 <- T3[order(T3$control, T3$diff), ]
 T3$active <- T3$control + T3$diff
 
-g3 <- scenarios(p = lapply(seq_len(nrow(T3)), function(i) c(T3$control[i], T3$active[i])))
-g3 <- do.call(rbind, lapply(c(n_rural, n_urban), function(nn) { g3$n_per_arm <- nn; g3 }))
-g3$alpha <- 0.05; g3$adjust <- "bonferroni"; g3$n_comparisons <- 2
-
-r3 <- run_power(d, g3, n_sim = 4000, seed = 3026, verbose = FALSE)
-half <- nrow(T3)
+T3$rural <- mapply(function(p0, p1) power_exact(n_rural, n_rural, p1, p0, alpha_2),
+                   T3$control, T3$active)
+T3$urban <- mapply(function(p0, p1) power_exact(n_urban, n_urban, p1, p0, alpha_2),
+                   T3$control, T3$active)
 ```
+
+Exact enumeration is cheap at these sample sizes, so the subgroup table uses it
+directly rather than simulating.
 
 ```{r t3-table, echo = FALSE}
 kable(data.frame(
   Control = pct(T3$control),
   Active  = pct(T3$active),
   `Diff (pp)` = T3$diff * 100,
-  `Rural (333/arm)` = sprintf("%.3f", r3$power[1:half]),
-  `Urban (667/arm)` = sprintf("%.3f", r3$power[(half + 1):(2 * half)]),
+  `Rural (333/arm)` = sprintf("%.3f", T3$rural),
+  `Urban (667/arm)` = sprintf("%.3f", T3$urban),
   check.names = FALSE
 ), caption = "Within-subgroup power at the budget, alpha = 0.025.")
 ```
 
 ```{r t3-plot, echo = FALSE}
-library(ggplot2)
 pd <- rbind(
-  data.frame(T3, power = r3$power[1:half],                  subgroup = "Rural (333/arm)"),
-  data.frame(T3, power = r3$power[(half + 1):(2 * half)],   subgroup = "Urban (667/arm)")
+  data.frame(T3[c("control", "diff")], power = T3$rural, subgroup = "Rural (333/arm)"),
+  data.frame(T3[c("control", "diff")], power = T3$urban, subgroup = "Urban (667/arm)")
 )
 ggplot(pd, aes(diff * 100, power, colour = factor(control * 100), group = control)) +
-  geom_hline(yintercept = 0.80, linetype = 2, colour = "grey40") +
+  geom_hline(yintercept = 0.80, linetype = 2, colour = "grey45") +
   geom_line() + geom_point(size = 1.2) +
   facet_wrap(~subgroup) +
   scale_y_continuous(limits = c(0, 1)) +
   labs(x = "Absolute difference vs. control (percentage points)",
-       y = "Power", colour = "Control\nevent rate (%)",
+       y = "Power", colour = "Control\nrate (%)",
        caption = "Dashed line = 80% power. alpha = 0.025.") +
   theme_minimal(base_size = 11)
 ```
 
 ## Minimum detectable effect
 
-The single number the LOI actually needs.
-
 ```{r mde}
 mde <- function(n, p0, alpha, target = 0.80) {
-  uniroot(function(dd) power.prop.test(n, p0, p0 + dd, alpha)$power - target,
+  uniroot(function(d) power.prop.test(n, p0, p0 + d, alpha)$power - target,
           c(0.005, 0.40))$root
 }
-grid <- expand.grid(control = controls,
-                    Group = c("Full arm (1000)", "Rural (333)", "Urban (667)"))
-grid$n <- c(n_arm, n_rural, n_urban)[as.integer(grid$Group)]
-grid$mde_pp <- mapply(function(n, p0) mde(n, p0, 0.025) * 100, grid$n, grid$control)
+mde_tab <- data.frame(
+  Control = pct(controls),
+  `Full arm (1000)` = sprintf("%.1f", sapply(controls, function(p) mde(n_arm, p, alpha_2) * 100)),
+  `Urban (667)`     = sprintf("%.1f", sapply(controls, function(p) mde(n_urban, p, alpha_2) * 100)),
+  `Rural (333)`     = sprintf("%.1f", sapply(controls, function(p) mde(n_rural, p, alpha_2) * 100)),
+  check.names = FALSE
+)
+```
 
-kable(reshape(
-  data.frame(Control = pct(grid$control),
-             Group = as.character(grid$Group),
-             MDE = sprintf("%.1f", grid$mde_pp)),
-  idvar = "Control", timevar = "Group", direction = "wide"),
-  row.names = FALSE,
-  col.names = c("Control rate", "Full arm (1000)", "Rural (333)", "Urban (667)"),
-  caption = "Minimum detectable difference (percentage points) at 80% power, alpha = 0.025.")
+```{r mde-table, echo = FALSE}
+kable(mde_tab, row.names = FALSE,
+      caption = "Minimum detectable difference (percentage points) at 80% power, alpha = 0.025.")
 ```
 
 ## Headline for the LOI
 
 ```{r headline, echo = FALSE, results = "asis"}
-m_full  <- mde(n_arm,  0.40, 0.025) * 100
-m_rural <- mde(n_rural, 0.40, 0.025) * 100
-m_urban <- mde(n_urban, 0.40, 0.025) * 100
 cat(sprintf(
-"> With 3000 participants randomised 1:1:1, each active-vs-control comparison has 80%% power to detect an absolute difference of **%.1f percentage points** against a 40%% control event rate (two-sided alpha = 0.025, Bonferroni-adjusted for two primary comparisons). Within the prespecified subgroups, the corresponding minimum detectable differences are **%.1f pp** in the urban stratum (667/arm) and **%.1f pp** in the rural stratum (333/arm).\n",
-m_full, m_urban, m_rural))
+"> With 3000 participants randomised 1:1:1, each active-vs-control comparison has
+80%% power to detect an absolute difference of **%.1f percentage points** against
+a 40%% control event rate (two-sided alpha = 0.025, Bonferroni-adjusted for two
+primary comparisons). Within the prespecified subgroups, the corresponding
+minimum detectable differences are **%.1f pp** in the urban stratum (667/arm) and
+**%.1f pp** in the rural stratum (333/arm).\n",
+mde(n_arm, 0.40, alpha_2) * 100,
+mde(n_urban, 0.40, alpha_2) * 100,
+mde(n_rural, 0.40, alpha_2) * 100))
 ```
+
+## Assumptions and limitations
+
+- Control event rates are a range rather than a point estimate, which is why
+  every table varies them — the LOI does not commit to one.
+- No allowance for dropout. If the outcome can be missing, inflate N
+  accordingly or add it to the simulation.
+- The simulated test is the uncorrected two-sample comparison of proportions.
+  If the SAP specifies a covariate-adjusted model, power will differ somewhat.
+- Nothing here represents site effects, clustering by clinician, or interim
+  analyses.
 
 ## Notes for reuse
 
-- **Unequal allocation.** Pass `n_per_arm = c(n1, n2, n3)`; the exact power
-  routine handles unequal arms directly.
-- **If the outcome is clustered** (sites, clinicians), switch to
-  `design_binary_cluster()` and supply an ICC — see the ICC column in the
-  [index](../../README.md).
-- **Non-inferiority or a different test.** `test = "fisher"` or
-  `test = "logistic"` swap the analysis without touching the DGP.
-- The exact-enumeration check (`check_against_analytic`) costs almost nothing
-  at these sample sizes. Run it whenever the DGP changes.
+- **Unequal allocation.** Give `simulate_one()` separate arm sizes and pass both
+  to `power_exact()`, which already takes `n1` and `n0`.
+- **A different test.** Swap `prop.test()` for `fisher.test()` or a logistic
+  model — but note the exact enumeration is specific to the uncorrected
+  chi-square test, so it stops being the right yardstick.
+- **Subgroups** need nothing new: run the same calculation at the stratum size.
+
+## Reproducibility
 
 ```{r session, echo = FALSE}
 sessionInfo()$R.version$version.string

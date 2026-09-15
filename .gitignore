@@ -1,11 +1,13 @@
-# Knitted output — regenerate from the .Rmd rather than committing it
-analyses/**/*.html
-analyses/**/*.pdf
-analyses/**/*.md
-analyses/**/figure/
-analyses/**/*_files/
-analyses/**/*_cache/
-analyses/**/cache/
+# Knitted output and knitr working files — regenerate from the .Rmd
+*.html
+*.pdf
+cache/
+figure/
+*_files/
+*_cache/
+
+# Keep the analysis sources themselves
+!**/analysis.Rmd
 
 # R session cruft
 .Rhistory

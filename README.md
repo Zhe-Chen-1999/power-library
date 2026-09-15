@@ -1,226 +1,106 @@
 # Power library
 
-Shared, reusable power and sample size analyses for the group.
+A record of the power and sample size analyses the group has run, so that when a
+new project starts you can find the closest thing we've already done and work
+from it rather than from scratch.
 
-Two problems this is trying to solve. First, we keep re-deriving the same
-calculations from scratch — the PCORI three-arm binary tables and the PARMA
-Bayesian survival simulation had almost nothing in common as code, but about
-80% in common as *structure*. Second, when a new project starts, nobody can
-easily find the closest thing we've already done. The index below is the answer
-to the second problem; the engine in `R/` is the answer to the first.
+Two parts: an **index** of completed analyses, and a **template** for each design
+type to start a new one from.
 
-## The index
-
-Scan this to find the nearest precedent for a new project. Generated from
-[`registry/analyses.yml`](registry/analyses.yml) — edit that file, then run
-`source("R/load.R"); build_index()`.
-
-<!-- INDEX:START -->
+## Index
 
 | Study | Outcome | Framework | Arms | Design | Key design features | Code |
 |---|---|---|---|---|---|---|
-| **PCORI LOI** (2026)<br><sub>Sample size and power for a three-arm pragmatic trial, plus rural/urban subgroup power</sub><br><sub>Zhe Chen &middot; final</sub> | Binary | frequentist | 3 | Parallel-arm RCT, individually randomised | Two non-symmetric active arms; Bonferroni across 2 primary and 3 pairwise comparisons; prespecified subgroup power at a 1/3 vs 2/3 split; fixed N = 3000 budget | [analysis.Rmd](analyses/2026-09_pcori-3arm-binary/analysis.Rmd) |
-| **PARMA (pediatric ARDS, high vs low driving pressure)** (2025)<br><sub>Bayesian power to detect a >90% posterior probability of benefit in time to hypoxemia resolution</sub><br><sub>Zhe Chen, Nadir Yehya &middot; used-in-submission</sub> | Time-to-event | Bayesian | 2 | Parallel-arm RCT, Bayesian analysis | Weibull PH model in JAGS; death as competing event handled as cause-specific censoring; 28-day administrative censoring; posterior-probability decision rule; prior sensitivity on the treatment-effect precision | [analysis.Rmd](analyses/2025-09_parma-weibull-bayes/analysis.Rmd) |
+| **PCORI LOI** (2026)<br><sub>Three-arm pragmatic trial; sample size, power at budget, rural/urban subgroups</sub><br><sub>Zhe Chen · final</sub> | Binary | frequentist | 3 | Parallel-arm, individually randomised | Two non-symmetric active arms; Bonferroni across 2 primary and 3 pairwise comparisons; prespecified subgroup power at a 1/3 vs 2/3 split; fixed N = 3000 | [analysis.Rmd](analyses/2026-09_pcori-3arm-binary/analysis.Rmd) |
+| **PARMA** (2025)<br><sub>Pediatric ARDS, high vs low driving pressure; Bayesian power for time to hypoxemia resolution</sub><br><sub>Zhe Chen, Nadir Yehya · used in submission</sub> | Time-to-event | Bayesian | 2 | Parallel-arm, Weibull PH fitted in JAGS | Death as a competing event, handled as cause-specific censoring; 28-day administrative censoring; posterior-probability decision rule; prior sensitivity | [analysis.Rmd](analyses/2025-09_parma-weibull-bayes/analysis.Rmd) |
 
-<!-- INDEX:END -->
+### Column conventions
 
-## Quick start
+Keep these consistent — the value of the index is being able to scan it for
+"anything with an ICC" or "any Bayesian time-to-event", and that only works if
+entries are described the same way.
 
-```r
-source("R/load.R")
-
-d <- design_binary_parallel()
-
-# Power across a grid of scenarios
-run_power(d,
-          scenarios(p = list(c(0.40, 0.50), c(0.40, 0.55)),
-                    n_per_arm = c(200, 400)),
-          n_sim = 2000)
-
-# Smallest n per arm reaching 80% power
-solve_n(d, params = list(p = c(0.40, 0.55)), target = 0.80)
-
-# Validate the simulation against the exact power of the test it runs
-check_against_analytic(d, data.frame(n_per_arm = c(150, 300)))
-```
-
-## How it works
-
-The engine knows nothing about any particular design. A **design** is three
-things:
-
-```r
-new_design(
-  name     = "my_design",
-  dgp      = function(params) { ... },        # -> a data.frame: one trial
-  analyze  = function(data, params) { ... },  # -> named vector incl. `reject`
-  defaults = list(...),                       # parameters, overridable per scenario
-  analytic = function(params) { ... },        # optional closed form, for validation
-  meta     = list(design = , outcome = , features = )
-)
-```
-
-`run_power()` replicates that pair over a grid of scenarios and averages
-`reject`. **What `reject` means is the design's business.** For a frequentist
-test it is `p < alpha`. For the Bayesian survival design it is
-`Pr(HR > 1 | data) >= 0.90`. The engine doesn't care, which is why one piece of
-machinery covers both, and why adding a stepped-wedge or ordinal design means
-writing two functions rather than another standalone script.
-
-Everything else `analyze()` returns is averaged and carried along, so posterior
-means, event counts, realised effect sizes and convergence diagnostics come out
-of the same call as the power.
-
-### What you get back
-
-`run_power()` returns the scenario grid plus:
-
-| Column | Meaning |
+| Column | What goes in it |
 |---|---|
-| `power` | proportion of replicates with `reject == 1` |
-| `mc_se`, `power_lo`, `power_hi` | Monte Carlo error of that estimate — the *simulation's* precision, not the trial's |
-| `n_sim`, `n_failed` | replicates attempted, and how many were unusable |
-| *(others)* | mean of every other quantity `analyze()` returned |
+| **Study** | Trial or grant name, year, a one-line description, then analyst and status on a second line. Status is `draft`, `final`, or `used in submission`. |
+| **Outcome** | Binary / Continuous / Time-to-event / Ordinal / Count |
+| **Framework** | frequentist / Bayesian |
+| **Arms** | Number of arms |
+| **Design** | Parallel-arm / Cluster-randomised / Stepped-wedge / Crossover, and how randomisation works |
+| **Key design features** | The things that determine whether this analysis is worth copying: clustering and ICC, repeated measures, multiplicity, competing risks, interim analyses, sample size constraints |
+| **Code** | Link to the analysis document |
 
-`n_failed` matters, so check it. A replicate counts as failed if `analyze()`
-errored **or** if it returned without a usable `reject` — the case where a
-model didn't converge but didn't throw. Averaging those away with `na.rm`
-would flatter exactly the scenarios that struggle, which are the ones you most
-need to see. Power is computed over the usable replicates only, and the count
-of the rest is reported next to it.
+## Templates
 
-## Validation
+| Template | Use it for |
+|---|---|
+| [`templates/binary-parallel.Rmd`](templates/binary-parallel.Rmd) | Parallel-arm trial, binary outcome. Multiplicity, subgroup power, exact power validation. |
+| [`templates/bayesian-survival.Rmd`](templates/bayesian-survival.Rmd) | Parallel-arm trial, time-to-event outcome, Bayesian analysis. Weibull PH in JAGS, competing risks, posterior-probability decision rule. |
 
-Every design with a closed-form counterpart is checked against it:
+Both run as-is with placeholder numbers, so knit one before changing anything and
+confirm you get output.
 
-```r
-check_against_analytic(design_binary_parallel(),
-                       data.frame(n_per_arm = c(150, 300)))
-```
-
-For `design_binary_parallel()` the comparison is against the **exact** power,
-computed by enumerating every 2×2 table the trial could produce
-(`power_two_props_exact()`) — not against `power.prop.test()`, which is a normal
-approximation and differs by up to ~2 percentage points at n = 150/arm (usually
-conservative; `tests/test_engine.R` prints the gap). The exact value is the true
-power of the test the simulation actually performs, so agreement is a real
-correctness check rather than two approximations agreeing with each other.
-
-`power_two_props_normal()` reproduces `power.prop.test()` when you want the
-conventional number for a protocol, and `analytic_method = "normal"` switches
-the design's check over to it.
-
-`design_binary_cluster()` has no exact counterpart, so its `analytic` is the
-standard design-effect inflation — a sanity check on the order of magnitude,
-not ground truth. Its DGP is validated separately by recovering the requested
-ICC and cluster-size CV from simulated data.
-
-Run the full suite:
-
-```
-Rscript tests/test_engine.R
-```
-
-## Runtime
-
-The binary designs are effectively free — thousands of replicates a second. The
-JAGS designs are not: one fit is ~60 ms, so a 1000-replicate scenario is about
-a minute on 8 cores, and the full PARMA analysis (roughly 17,000 fits across
-its sensitivity grids) takes about 22 minutes from a cold cache.
-
-Two things follow. Keep `cache = TRUE` on the expensive chunks, and keep the
-computation in a *different* chunk from the `kable()` that presents it —
-otherwise every wording tweak re-runs the simulation. And while exploring, drop
-`n_iter` and `n_sim`; raise them only for the numbers that go into the
-application. `mc_se` tells you when you've raised them enough.
-
-## Layout
-
-```
-R/
-  engine.R              run_power(), scenarios(), solve_n(), check_against_analytic()
-  dgp_binary.R          binary outcomes: parallel-arm, cluster-randomised
-  dgp_weibull_bayes.R   Bayesian Weibull survival (JAGS) + Cox comparator
-  registry.R            the index table
-  load.R                source this
-jags/
-  weibull_ph.jags       Weibull PH model; N and priors passed as data
-analyses/
-  TEMPLATE.Rmd          starting point for a new analysis
-  <year-month>_<slug>/  one directory per analysis, with analysis.Rmd
-registry/
-  analyses.yml          the index, one entry per analysis
-tests/
-  test_engine.R
-```
+**Each document is self-contained.** Nothing is `source()`d — the simulation
+loop, the analysis, and (for the Bayesian one) the JAGS model all live in the
+file you're reading. You can copy a single `.Rmd` somewhere else and it still
+works, and you can read one top to bottom without following anything into a
+library.
 
 ## Adding an analysis
 
-1. `cp analyses/TEMPLATE.Rmd analyses/2026-11_my-trial/analysis.Rmd`, or start
-   from whichever existing analysis is closest — that's what the index is for.
-   The template's headings are the ones a reviewer or a DSMB will look for,
-   including the two that are easiest to skip and most expensive to skip:
-   *verify the DGP* and *validation*.
-2. Source the library with `source("../../R/load.R")`.
-3. If the design is new, add a `design_*()` constructor to `R/` rather than
-   defining it inline in the Rmd. That is the difference between a library and
-   a folder of scripts.
-4. Register it and refresh the index:
+1. Copy the closest template — or the closest completed analysis, if one of them
+   is nearer to your design.
 
-```r
-source("R/load.R")
-add_entry(
-  id        = "2026-11_my-trial",
-  title     = "Power for the primary endpoint",
-  study     = "MY-TRIAL",
-  analyst   = "...",
-  design    = "Stepped-wedge cluster-randomised",
-  outcome   = "Binary",
-  framework = "frequentist",
-  n_arms    = "2",
-  features  = "12 clusters, 6 steps, ICC 0.03, CAC 0.8"
-)
-build_index()
-```
+   ```
+   mkdir analyses/2026-11_my-trial
+   cp templates/binary-parallel.Rmd analyses/2026-11_my-trial/analysis.Rmd
+   ```
 
-Keep the `features` field specific and keep filling in every column. Once there
-are twenty entries, the value of the index is being able to answer "show me
-everything we've done with an ICC" or "show me every Bayesian time-to-event
-analysis" — and that only works if the fields are populated consistently.
+   Use `YYYY-MM_slug` so the folder sorts chronologically.
 
-## Designs currently available
+2. Work through it top to bottom, replacing the placeholder numbers.
 
-| Constructor | Design | Outcome | Notes |
-|---|---|---|---|
-| `design_binary_parallel()` | Parallel-arm RCT | Binary | 2+ arms, arm-specific event rates, Bonferroni, exact power available |
-| `design_binary_cluster()` | Cluster-randomised | Binary | ICC exact via beta-binomial, unequal cluster sizes, cluster-level t-test or GLMM |
-| `design_weibull_bayes()` | Parallel-arm, Bayesian | Time-to-event | Weibull PH in JAGS, competing risks, posterior-probability decision rule |
-| `design_weibull_cox()` | Parallel-arm, frequentist | Time-to-event | Same DGP as above; isolates the effect of the analysis model |
+3. Add a row to the index table above.
 
-Obvious gaps, roughly in order of how often we hit them: **stepped-wedge**
-(Yingying has run these), **continuous outcomes with repeated measures**,
-**ordinal outcomes** (proportional odds), and **group-sequential / interim
-analyses**. Each is a `design_*()` constructor away.
+Two conventions worth keeping, both of which the templates already follow:
+
+- **Validate against something.** If the design has a closed form, check the
+  simulation against it and show the comparison. If it doesn't, verify the
+  data-generating model recovers the effect you asked for, and report the type I
+  error under the null. A simulation that produces a number is not the same as
+  one that produces the right number.
+- **Keep `kable()` out of cached chunks.** Put the computation in a chunk with
+  `cache = TRUE` and the table in a separate chunk. Otherwise fixing a typo
+  re-runs the simulation, which for a JAGS design means waiting fifteen minutes.
+
+## Runtime
+
+The binary designs are effectively free — thousands of replicates a second, and
+the PCORI document knits in about 15 seconds.
+
+JAGS is not. One fit is roughly 60 ms, so a 1000-replicate scenario takes about a
+minute on 8 cores, and the PARMA document is around 13,000 fits — about 15
+minutes from a cold cache. While exploring, drop `n_sim` and `n_iter`; raise them
+only for the numbers that go into the application. The reported `mc_se` tells you
+when they're high enough.
 
 ## Requirements
 
 R ≥ 4.4, and:
 
 ```r
-# core -- needed to load the library at all
-install.packages(c("future.apply", "tibble", "dplyr", "yaml", "survival"))
+install.packages(c("future.apply", "knitr", "ggplot2", "rmarkdown"))
 
-# optional, loaded only where used
-install.packages("lme4")                          # GLMM analysis of cluster trials
-install.packages("rjags")                         # Bayesian designs; needs JAGS:
-                                                  #   brew install jags
-install.packages(c("ggplot2", "knitr", "rmarkdown"))  # to run the analyses/
+# time-to-event templates only
+install.packages(c("survival", "rjags"))   # rjags needs JAGS: brew install jags
 ```
 
-`rjags` and `lme4` are referenced with `::` at the point of use, so the library
-loads and the binary designs work on a machine without either. Asking for a
-design you can't run gives an error that says what to install.
+Rendering to HTML also needs `pandoc` (`brew install pandoc`). Without it you can
+still run a document end to end with `knitr::knit("analysis.Rmd")`.
 
-Rendering the analyses to HTML also needs `pandoc` (`brew install pandoc`);
-without it you can still execute an analysis end to end with
-`knitr::knit("analysis.Rmd")`.
+## Gaps
+
+Designs we've hit before and haven't written up yet, roughly in order of how
+often they come up: **stepped-wedge**, **continuous outcomes with repeated
+measures**, **cluster-randomised with an ICC**, **ordinal outcomes**, and
+**group-sequential designs with interim analyses**. Each is a new template.

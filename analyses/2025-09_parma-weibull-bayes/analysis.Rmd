@@ -2,167 +2,275 @@
 title: "PARMA — Bayesian power for a Weibull time-to-event endpoint"
 subtitle: "Time to resolution of hypoxemia, high vs. low driving pressure in pediatric ARDS"
 author: "Zhe Chen, with Nadir Yehya"
-date: "September 2025 (ported into the power library, September 2026)"
+date: "September 2025"
 output:
   html_document:
     toc: true
     toc_float: true
-    df_print: kable
 ---
 
 ```{r setup, include = FALSE}
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
                       fig.width = 8, fig.height = 4.5)
-source("../../R/load.R")
-library(knitr); library(ggplot2)
+library(future.apply)
+library(rjags)
+library(survival)
+library(knitr)
+library(ggplot2)
+plan(multisession, workers = max(1, parallel::detectCores() - 1))
 ```
+
+Started from `templates/bayesian-survival.Rmd`. Self-contained — the JAGS model
+is written out below, and nothing is sourced from elsewhere. Needs JAGS
+installed (`brew install jags`).
 
 ## The question
 
-PARMA randomises **160** children with ARDS to a high vs. low driving pressure
-ventilation strategy. The primary endpoint is **time to resolution of
-hypoxemia** (alive with PaO₂/FiO₂ > 300 on two measurements four hours apart),
+PARMA randomises **160** children with ARDS to a high versus low driving
+pressure ventilation strategy. The primary endpoint is **time to resolution of
+hypoxemia** — alive with PaO₂/FiO₂ > 300 on two measurements four hours apart —
 followed for **28 days**. Death acts as a **competing event**.
 
-Because the event here is a *good* one, a hazard ratio **greater than 1** is
-benefit: the treated arm resolves sooner.
+Because the event is a *good* one, a hazard ratio **greater than 1** is benefit:
+the treated arm resolves sooner.
 
-Inference is Bayesian, and the design question is correspondingly not "will
-p < 0.05" but:
+Inference is Bayesian, so the design question is not "will p < 0.05" but:
 
 > How often would this trial produce a posterior probability of benefit,
 > `Pr(HR > 1 | data)`, above 0.90?
 
-That frequency **is** the power. In this library it is the same
-`run_power()` call as any frequentist design — the only thing that changes is
-what the design's `analyze()` returns as `reject`.
+That frequency **is** the power.
 
-```{r design}
-d <- design_weibull_bayes()
-d
+## Assumptions
+
+```{r params}
+n_total    <- 160
+p_treat    <- 0.5
+true_hr    <- 1.6
+beta_true  <- log(true_hr)
+
+shape      <- 0.9      # Weibull shape, primary event
+scale_ctrl <- 4        # Weibull scale, control arm
+mean_comp  <- 21       # mean time to the competing event (death), exponential
+horizon    <- 28       # administrative censoring, days
+
+threshold  <- 0.90     # posterior probability bar
+prior_trt_prec <- 0.2  # minimally informative; SD ~2.24 on the log-HR scale
+prior_b0_prec  <- 0.5
+prior_a_shape  <- 1.1
+prior_a_rate   <- 1.1
+
+n_iter <- 5000
+seed   <- 2026
 ```
 
-## Data-generating model
+## The parameterisation, written down once
 
-Event times are Weibull. The control arm is calibrated to empirical CHOP data;
-the treated arm shifts it by the target log hazard ratio.
+R's `rweibull(shape = a, scale = b)` has $S(t) = \exp\{-(t/b)^a\}$.
+JAGS's `dweib(alpha, lambda)` has $S(t) = \exp\{-\lambda t^{\alpha}\}$.
+They correspond with $\alpha = a$ and $\lambda = b^{-a}$, so proportional
+hazards with log hazard ratio $\beta$ requires
 
-```{r dgp-params}
-pars <- design_params(d,
-  n              = 160,
-  beta           = log(1.6),   # target log HR (benefit)
-  shape_event    = 0.9,
-  scale_event    = 4,
-  competing_dist = "exp",
-  scale_comp     = 21,         # mean time to the competing event (death)
-  horizon        = 28,
-  threshold      = 0.90
-)
+$$b_{\text{trt}} = b_{\text{ctrl}} \cdot e^{-\beta / a}$$
 
-ctrl <- weibull_control_summary(pars$scale_event, pars$shape_event)
-trt_scale <- weibull_scale_for_arm(pars$scale_event, pars$shape_event, pars$beta, 1)
-trt  <- weibull_control_summary(trt_scale, pars$shape_event)
+and the baseline intercept on the JAGS scale is
+$\beta_0 = -a \log b_{\text{ctrl}}$. This is the one place where a slip would
+leave the simulation running perfectly while powering the wrong effect, so it
+lives in a single function.
 
+```{r param-helpers}
+scale_for_arm <- function(scale_ctrl, shape, beta, trt) {
+  scale_ctrl * exp(-beta * trt / shape)
+}
+beta0_true <- -shape * log(scale_ctrl)
+
+arm_summary <- function(b, a) c(mean = b * gamma(1 + 1 / a),
+                                median = b * log(2)^(1 / a))
+ctrl_s <- arm_summary(scale_ctrl, shape)
+trt_s  <- arm_summary(scale_for_arm(scale_ctrl, shape, beta_true, 1), shape)
+```
+
+```{r arms-table, echo = FALSE}
 kable(data.frame(
-  Arm    = c("Control", "High driving pressure"),
-  `Weibull scale` = sprintf("%.2f", c(pars$scale_event, trt_scale)),
-  `Mean time to resolution (days)`   = sprintf("%.1f", c(ctrl["mean"],   trt["mean"])),
-  `Median time to resolution (days)` = sprintf("%.1f", c(ctrl["median"], trt["median"])),
+  Arm = c("Control", "High driving pressure"),
+  `Weibull scale` = sprintf("%.2f", c(scale_ctrl,
+                                      scale_for_arm(scale_ctrl, shape, beta_true, 1))),
+  `Mean time to resolution (days)`   = sprintf("%.1f", c(ctrl_s["mean"], trt_s["mean"])),
+  `Median time to resolution (days)` = sprintf("%.1f", c(ctrl_s["median"], trt_s["median"])),
   check.names = FALSE
-), caption = "Implied control and treated arms. Shape = 0.9, true HR = 1.6.")
+), caption = sprintf("Implied arms. Shape = %.1f, true HR = %.1f. beta0 = %.3f.",
+                     shape, true_hr, beta0_true))
 ```
 
 ```{r dgp-note, echo = FALSE, results = "asis"}
 cat(sprintf(
-"**Worth flagging.** The original PARMA analysis plan describes these as mean times to resolution of \"approximately 5 days in the control arm and 3 days in the intervention arm\". The parameters it actually simulates (shape %.1f, scale %.0f) imply **%.1f** and **%.1f** days. The hazard ratio -- which is what the power calculation depends on -- is exactly the intended %.1f either way, so the reported power is unaffected. But the prose and the code disagree, and a control scale of about 4.75 rather than 4 would be needed to make the 5-day description literally true. Worth reconciling before this text is reused in a resubmission.\n",
-pars$shape_event, pars$scale_event, ctrl["mean"], trt["mean"], exp(pars$beta)))
+"**Worth flagging.** The original PARMA analysis plan describes these as mean
+times to resolution of \"approximately 5 days in the control arm and 3 days in
+the intervention arm\". The parameters it actually simulates (shape %.1f, scale
+%.0f) imply **%.1f** and **%.1f** days. The hazard ratio — which is what the
+power calculation depends on — is exactly the intended %.1f either way, so the
+reported power is unaffected. But the prose and the code disagree, and a control
+scale of about 4.75 rather than 4 would be needed to make the 5-day description
+literally true. Worth reconciling before that text is reused.\n",
+shape, scale_ctrl, ctrl_s["mean"], trt_s["mean"], true_hr))
 ```
 
-### The parameterisation, written down once
+## The model
 
-This is the step that quietly breaks these simulations, so it lives in one
-function and is stated explicitly here.
-
-R's `rweibull(shape = a, scale = b)` has $S(t) = \exp\{-(t/b)^a\}$.
-JAGS's `dweib(alpha, lambda)` has $S(t) = \exp\{-\lambda t^{\alpha}\}$.
-They match with $\alpha = a$ and $\lambda = b^{-a}$. Proportional hazards with
-log-HR $\beta$ therefore requires
-
-$$b_{\text{trt}} = b_{\text{ctrl}} \cdot e^{-\beta / a},$$
-
-which is `weibull_scale_for_arm()`. The consequence of the exponent is that the
-baseline intercept on the JAGS scale is $\beta_0 = -a \log b_{\text{ctrl}}$:
-
-```{r beta0}
-sprintf("beta0 implied by the data-generating control arm: %.3f",
-        weibull_beta0_true(pars$scale_event, pars$shape_event))
+```{r jags-model}
+jags_model <- "
+model {
+  for (i in 1:N) {
+    # dinterval() handles right censoring: t[i] is NA when censored, and
+    # is.censored[i] = 1 tells JAGS the true value exceeds t.cen[i].
+    is.censored[i] ~ dinterval(t[i], t.cen[i])
+    t[i] ~ dweib(alpha, lambda[i])
+    lambda[i] <- exp(beta0 + beta.trt * trt[i])
+  }
+  beta0    ~ dnorm(prior_b0_mean, prior_b0_prec)
+  beta.trt ~ dnorm(0, prior_trt_prec)
+  alpha    ~ dgamma(prior_a_shape, prior_a_rate)
+}
+"
+model_file <- tempfile(fileext = ".jags")
+cat(jags_model, file = model_file)
 ```
 
-That matters below, because the baseline prior is centred on it.
-
-### Verifying the DGP hits the intended effect
-
-Before powering anything, confirm the simulator produces the hazard ratio it
-was asked for. Fit a Cox model to one very large simulated trial:
-
-```{r dgp-check, cache = TRUE}
-set.seed(1)
-big <- d$dgp(design_params(d, n = 200000))
-cf  <- summary(survival::coxph(survival::Surv(time, status) ~ trt, data = big))$coefficients
-sprintf("target log HR = %.4f | Cox estimate on n = 200,000: %.4f (SE %.4f) | event fraction %.3f",
-        log(1.6), cf["trt", "coef"], cf["trt", "se(coef)"], mean(big$status))
-```
-
-```{r dgp-plot, echo = FALSE, fig.height = 4}
-set.seed(2)
-one <- d$dgp(pars)
-km  <- survival::survfit(survival::Surv(time, status) ~ trt, data = one)
-plot(km, col = c("#4C6EF5", "#E8590C"), lwd = 2, xlab = "Days since randomisation",
-     ylab = "Proportion with unresolved hypoxemia", mark.time = TRUE)
-legend("topright", c("Low driving pressure (control)", "High driving pressure"),
-       col = c("#4C6EF5", "#E8590C"), lwd = 2, bty = "n")
-title("One simulated PARMA trial (n = 160)")
-```
-
-## Analysis model
-
-```{r jags-model, echo = FALSE, comment = ""}
-cat(readLines(powerlib_path("jags", "weibull_ph.jags")), sep = "\n")
-```
-
-Note that `N` and every prior hyperparameter arrive as data. The original
-version of this model hard-coded `for(i in 1:160)`, which meant a new file per
-sample size; making them data is what lets the same file serve the sensitivity
-analyses below.
-
-Priors, as in the original analysis plan:
+`N` and every prior hyperparameter arrive as **data**, so this one model serves
+every sample size and every prior in the sensitivity analyses below. The
+original version hard-coded `for(i in 1:160)`, which meant a separate file per
+scenario.
 
 | Parameter | Prior | Rationale |
 |---|---|---|
 | `beta.trt` | `dnorm(0, 0.2)` | Minimally informative, centred at **no effect** (HR = 1). Precision 0.2 = SD ≈ 2.24 on the log-HR scale. |
-| `beta0` | `dnorm(·, 0.5)` | Baseline hazard, moderately informative, centred on the control-arm value implied by the empirical data. |
+| `beta0` | `dnorm(·, 0.5)` | Baseline hazard, moderately informative. |
 | `alpha` | `dgamma(1.1, 1.1)` | Weibull shape; mean 1, variance ≈ 0.91. |
 
-Centring `beta.trt` at zero is what makes the power calculation honest: the
+Centring `beta.trt` at zero is what makes the power calculation honest — the
 prior is not helping the trial find an effect.
+
+## Machinery
+
+```{r helpers}
+simulate_trial <- function(n, beta) {
+  trt <- rbinom(n, 1, p_treat)
+  t_event <- rweibull(n, shape, scale_for_arm(scale_ctrl, shape, beta, trt))
+  t_comp  <- rexp(n, rate = 1 / mean_comp)
+  # Competing event and horizon both act as right censoring for the
+  # cause-specific hazard of the primary event.
+  t_cen   <- pmin(t_comp, horizon)
+  data.frame(trt = trt,
+             time   = pmin(t_event, t_cen),
+             status = as.numeric(t_event <= t_cen),
+             t_cen  = t_cen)
+}
+
+analyze_bayes <- function(d, beta, trt_prec = prior_trt_prec,
+                          b0_mean = beta0_true) {
+  jdata <- list(
+    N = nrow(d),
+    t = ifelse(d$status == 1, d$time, NA_real_),
+    t.cen = d$t_cen, trt = d$trt,
+    is.censored = 1 - d$status,
+    prior_b0_mean = b0_mean, prior_b0_prec = prior_b0_prec,
+    prior_trt_prec = trt_prec,
+    prior_a_shape = prior_a_shape, prior_a_rate = prior_a_rate
+  )
+  jinits <- list(list(t = ifelse(d$status == 0, d$t_cen + 1, NA_real_),
+                      beta0 = b0_mean, beta.trt = 0))
+
+  jm <- jags.model(model_file, jdata, jinits, n.chains = 1,
+                   n.adapt = 500, quiet = TRUE)
+  update(jm, 1000, progress.bar = "none")
+  s <- coda.samples(jm, c("beta0", "beta.trt", "alpha"),
+                    n.iter = n_iter, progress.bar = "none")
+
+  post <- as.numeric(s[[1]][, "beta.trt"])
+  q <- unname(quantile(post, c(0.025, 0.975)))
+
+  c(reject       = as.numeric(mean(post > 0) >= threshold),
+    # The same rule applied against the *assumed true* effect. The original
+    # memo reports this as its "type I error"; it is a calibration diagnostic,
+    # not a frequentist type I error rate, and should be described as such.
+    reject_truth = as.numeric(mean(post > beta) >= threshold),
+    reject_ci95  = as.numeric(q[1] > 0),
+    prob_benefit = mean(post > 0),
+    post_mean    = mean(post),
+    event_frac   = mean(d$status))
+}
+
+run_sim <- function(n_sim, seed, sim_one) {
+  out <- future_lapply(seq_len(n_sim),
+                       function(i) tryCatch(sim_one(), error = function(e) NULL),
+                       future.seed = seed)
+  ok <- !vapply(out, is.null, logical(1))
+  est <- colMeans(do.call(rbind, out[ok]))
+  power <- unname(est[["reject"]])
+  ci <- wilson_ci(power, sum(ok))
+  c(as.list(est), list(mc_se = sqrt(power * (1 - power) / sum(ok)),
+                       lo = ci[1], hi = ci[2], n_failed = sum(!ok)))
+}
+
+wilson_ci <- function(p, n, z = 1.96) {
+  d <- 1 + z^2 / n
+  centre <- (p + z^2 / (2 * n)) / d
+  half   <- z / d * sqrt(p * (1 - p) / n + z^2 / (4 * n^2))
+  c(max(0, centre - half), min(1, centre + half))
+}
+```
+
+## Verify the data-generating model
+
+```{r dgp-check, cache = TRUE}
+set.seed(1)
+big <- simulate_trial(200000, beta_true)
+cf  <- summary(coxph(Surv(time, status) ~ trt, data = big))$coefficients
+```
+
+```{r dgp-report, echo = FALSE, results = "asis"}
+cat(sprintf(
+"True log HR **%.4f**. Cox estimate on n = 200,000: **%.4f** (SE %.4f). Event
+fraction by day %g: %.3f. The simulator produces the hazard ratio it was asked
+for.\n",
+beta_true, cf["trt", "coef"], cf["trt", "se(coef)"], horizon, mean(big$status)))
+```
+
+```{r km-plot, echo = FALSE, fig.height = 4}
+set.seed(2)
+one <- simulate_trial(n_total, beta_true)
+plot(survfit(Surv(time, status) ~ trt, data = one),
+     col = c("#4C6EF5", "#E8590C"), lwd = 2, mark.time = TRUE,
+     xlab = "Days since randomisation",
+     ylab = "Proportion with unresolved hypoxemia")
+legend("topright", c("Low driving pressure (control)", "High driving pressure"),
+       col = c("#4C6EF5", "#E8590C"), lwd = 2, bty = "n")
+title(sprintf("One simulated PARMA trial (n = %d)", n_total))
+```
 
 ## Power
 
 ```{r power-main, cache = TRUE}
-r <- run_power(d, data.frame(n = 160), n_sim = 1000, seed = 2026, verbose = FALSE)
+main <- run_sim(1000, seed,
+                function() analyze_bayes(simulate_trial(n_total, beta_true), beta_true))
 ```
 
-```{r power-main-table, echo = FALSE}
+```{r power-table, echo = FALSE}
 kable(data.frame(
   Quantity = c("Power: Pr(HR > 1) >= 0.90",
                "Pr(HR > 1) >= 0.90 against the *assumed true* HR of 1.6",
                "95% credible interval excludes HR = 1",
                "Mean posterior Pr(HR > 1)",
-               "Mean posterior log HR (truth = 0.470)",
-               "Mean event fraction by day 28"),
-  Value = sprintf("%.3f", c(r$power, r$reject_vs_truth, r$reject_ci95,
-                            r$prob_benefit, r$post_mean_beta, r$event_frac)),
-  `MC SE` = c(sprintf("%.3f", r$mc_se), rep("", 5)),
+               sprintf("Mean posterior log HR (truth = %.3f)", beta_true),
+               "Mean event fraction by day 28",
+               "Failed fits"),
+  Value = c(sprintf("%.3f (MC SE %.3f)", main$reject, main$mc_se),
+            sprintf("%.3f", main$reject_truth),
+            sprintf("%.3f", main$reject_ci95),
+            sprintf("%.3f", main$prob_benefit),
+            sprintf("%.3f", main$post_mean),
+            sprintf("%.3f", main$event_frac),
+            sprintf("%d", main$n_failed)),
   check.names = FALSE
 ), caption = "1000 simulated trials, n = 160, true HR = 1.6.")
 ```
@@ -170,59 +278,78 @@ kable(data.frame(
 The second row is what the original memo reported as a "type I error rate". It
 is the same decision rule applied against the *assumed true* effect rather than
 the null — how often the trial would claim more benefit than was actually built
-in. It is a useful calibration diagnostic, but it is **not** a frequentist type
-I error rate, and it should be described as what it is when it appears in a
-protocol.
+in. Useful as a calibration diagnostic, but it is **not** a frequentist type I
+error rate and should be described as what it is in a protocol.
 
 ### Reproducing the original memo
 
-The original PARMA submission quoted 93% power at a type I error of 0.101,
-using a baseline prior fixed at `dnorm(-1.6, 0.5)`. The ported pipeline
-reproduces it:
+The submission quoted 93% power at a type I error of 0.101, using a baseline
+prior fixed at `dnorm(-1.6, 0.5)` rather than centred on the value the
+data-generating control arm implies.
 
 ```{r repro, cache = TRUE}
-r_repro <- run_power(d, data.frame(
-    label = c("This port (beta0 centred on the DGP)",
-              "Original memo (beta0 ~ dnorm(-1.6, 0.5))"),
-    center_beta0_at_truth = c(TRUE, FALSE),
-    prior_beta0_mean      = c(NA, -1.6)),
-  n_sim = 1000, seed = 2026, verbose = FALSE)
+repro_memo <- run_sim(1000, seed, function()
+  analyze_bayes(simulate_trial(n_total, beta_true), beta_true, b0_mean = -1.6))
 ```
 
 ```{r repro-table, echo = FALSE}
 kable(data.frame(
-  Configuration = r_repro$label,
-  Power = sprintf("%.3f (SE %.3f)", r_repro$power, r_repro$mc_se),
-  `"Type I error"` = sprintf("%.3f", r_repro$reject_vs_truth),
+  Configuration = c("This version (beta0 centred on the DGP)",
+                    "Original memo (beta0 ~ dnorm(-1.6, 0.5))"),
+  Power = sprintf("%.3f (SE %.3f)", c(main$reject, repro_memo$reject),
+                  c(main$mc_se, repro_memo$mc_se)),
+  `"Type I error"` = sprintf("%.3f", c(main$reject_truth, repro_memo$reject_truth)),
   check.names = FALSE
 ), caption = "Memo quoted 93% power and type I error 0.101.")
+```
+
+```{r repro-read, echo = FALSE, results = "asis"}
+cat(sprintf(
+"The headline reproduces: **%.3f** against the quoted 93%%, well inside Monte
+Carlo error. The two prior configurations are also indistinguishable from each
+other, which says the result does not depend on how the baseline prior was
+centred.
+
+The \"type I error\" column comes out at %.3f rather than the quoted 0.101. That
+statistic is noisier than the power — it counts how often the posterior clears
+the bar against the *assumed true* effect, which is an event of probability
+around 0.1, so its Monte Carlo SE at 1000 replicates is about %.3f. The gap is
+roughly %.1f standard errors and not evidence of a discrepancy, but it is also
+not a number to quote to three decimal places from a single run.\n",
+repro_memo$reject, repro_memo$reject_truth,
+sqrt(repro_memo$reject_truth * (1 - repro_memo$reject_truth) / 1000),
+abs(repro_memo$reject_truth - 0.101) /
+  sqrt(repro_memo$reject_truth * (1 - repro_memo$reject_truth) / 1000)))
 ```
 
 ## Sensitivity: sample size and effect size
 
 ```{r grid, cache = TRUE}
-g <- expand.grid(n = c(120, 140, 160, 180, 200, 240),
-                 beta = log(c(1.4, 1.6, 1.8)))
-rg <- run_power(d, g, n_sim = 500, seed = 4026, verbose = FALSE)
-rg$HR <- exp(rg$beta)
+grid <- expand.grid(n = c(120, 140, 160, 180, 200, 240), hr = c(1.4, 1.6, 1.8))
+grid_res <- do.call(rbind, lapply(seq_len(nrow(grid)), function(i) {
+  b <- log(grid$hr[i])
+  r <- run_sim(400, seed + 10 * i,
+               function() analyze_bayes(simulate_trial(grid$n[i], b), b))
+  data.frame(power = r$reject, lo = r$lo, hi = r$hi)
+}))
+grid <- cbind(grid, grid_res)
 ```
 
 ```{r grid-plot, echo = FALSE}
-ggplot(rg, aes(n, power, colour = factor(round(HR, 1)))) +
+ggplot(grid, aes(n, power, colour = factor(hr))) +
   geom_hline(yintercept = c(0.80, 0.90), linetype = 2, colour = "grey50") +
-  geom_ribbon(aes(ymin = power_lo, ymax = power_hi, fill = factor(round(HR, 1))),
-              alpha = 0.15, colour = NA) +
+  geom_ribbon(aes(ymin = lo, ymax = hi, fill = factor(hr)), alpha = 0.15, colour = NA) +
   geom_line(linewidth = 0.8) + geom_point() +
   scale_y_continuous(limits = c(0, 1)) +
   labs(x = "Total sample size", y = "Pr( Pr(HR > 1 | data) >= 0.90 )",
        colour = "True HR", fill = "True HR",
-       caption = "500 simulations per point; ribbon = Monte Carlo 95% interval.") +
+       caption = "400 simulations per point; ribbon = Monte Carlo 95% interval.") +
   theme_minimal(base_size = 11)
 ```
 
 ```{r grid-table, echo = FALSE}
-w <- reshape(data.frame(n = rg$n, HR = sprintf("HR = %.1f", rg$HR),
-                        power = sprintf("%.2f", rg$power)),
+w <- reshape(data.frame(n = grid$n, HR = sprintf("HR = %.1f", grid$hr),
+                        power = sprintf("%.2f", grid$power)),
              idvar = "n", timevar = "HR", direction = "wide")
 names(w) <- sub("^power\\.", "", names(w))
 kable(w, row.names = FALSE, caption = "Bayesian power by sample size and true HR.")
@@ -230,82 +357,114 @@ kable(w, row.names = FALSE, caption = "Bayesian power by sample size and true HR
 
 ## Sensitivity: the prior on the treatment effect
 
-The one assumption a reviewer will press on. Precision 0.2 is the pre-specified
+The assumption a reviewer will press on. Precision 0.2 is the pre-specified
 minimally informative choice; the others bracket it.
 
 ```{r prior-sens, cache = TRUE}
-rp <- run_power(d, data.frame(prior_trt_prec = c(0.05, 0.2, 1, 4)),
-                n_sim = 500, seed = 5026, verbose = FALSE)
-rp$prior_sd <- 1 / sqrt(rp$prior_trt_prec)
+precisions <- c(0.05, 0.2, 1, 4)
+prior_res <- do.call(rbind, lapply(seq_along(precisions), function(i) {
+  r <- run_sim(400, seed + 500 + i, function()
+    analyze_bayes(simulate_trial(n_total, beta_true), beta_true,
+                  trt_prec = precisions[i]))
+  data.frame(precision = precisions[i], sd = 1 / sqrt(precisions[i]),
+             power = r$reject, mc_se = r$mc_se, post_mean = r$post_mean)
+}))
 ```
 
-```{r prior-sens-table, echo = FALSE}
+```{r prior-table, echo = FALSE}
 kable(data.frame(
-  `Prior precision` = rp$prior_trt_prec,
-  `Prior SD (log HR)` = sprintf("%.2f", rp$prior_sd),
-  Power = sprintf("%.3f", rp$power),
-  `MC SE` = sprintf("%.3f", rp$mc_se),
-  `Mean posterior log HR` = sprintf("%.3f", rp$post_mean_beta),
-  `Shrinkage vs. truth (0.470)` = sprintf("%+.3f", rp$post_mean_beta - log(1.6)),
+  `Prior precision` = prior_res$precision,
+  `Prior SD (log HR)` = sprintf("%.2f", prior_res$sd),
+  Power = sprintf("%.3f", prior_res$power),
+  `MC SE` = sprintf("%.3f", prior_res$mc_se),
+  `Mean posterior log HR` = sprintf("%.3f", prior_res$post_mean),
+  `Shrinkage vs. truth` = sprintf("%+.3f", prior_res$post_mean - beta_true),
   check.names = FALSE
 ), caption = "Effect of the treatment-effect prior. All centred at HR = 1.")
 ```
 
-```{r prior-sens-read, echo = FALSE, results = "asis"}
-i_tight <- which.max(rp$prior_trt_prec)     # the deliberately over-tight case
-rest    <- setdiff(seq_len(nrow(rp)), i_tight)
+```{r prior-read, echo = FALSE, results = "asis"}
+tight <- which.max(prior_res$precision)
 cat(sprintf(
-"Read this as a *negative* result, which is the useful kind here. Across the three settings anyone would actually pre-specify -- prior SD %.2f, %.2f and %.2f on the log-HR scale -- power spans only %.3f, against a Monte Carlo SE of about %.3f on each estimate. Those three are indistinguishable; the design is not sensitive to the prior over that range, and the ordering between them is noise rather than signal.\n\nShrinkage only bites at the fourth setting, precision %.0f (prior SD %.2f), where the posterior mean falls from the true %.3f to %.3f and power to %.3f. A prior that tight is comparable in width to the effect being estimated, so it would be a strange thing to pre-specify. It is here to locate the boundary, not to recommend it.\n",
-rp$prior_sd[rest[1]], rp$prior_sd[rest[2]], rp$prior_sd[rest[3]],
-max(rp$power[rest]) - min(rp$power[rest]), mean(rp$mc_se),
-rp$prior_trt_prec[i_tight], rp$prior_sd[i_tight],
-log(1.6), rp$post_mean_beta[i_tight], rp$power[i_tight]))
+"Read this as a *negative* result, which is the useful kind here. Power spans
+only %.3f across all four settings — from a prior SD of %.2f down to %.2f on the
+log-HR scale — against a Monte Carlo SE of about %.3f on each estimate. They are
+statistically indistinguishable, and the ordering between them is noise rather
+than signal. At n = %d this design is simply not sensitive to the
+treatment-effect prior.
+
+Where the tightest prior *does* show up is in the estimate rather than the
+decision: at precision %.0f (prior SD %.2f) the posterior mean falls from the
+true %.3f to %.3f, a shrinkage of %.3f toward the null the prior is centred on.
+That is the expected behaviour and worth showing, but it does not translate into
+a power penalty here — the posterior still clears the %.2f bar about as often.
+A prior that tight is comparable in width to the effect being estimated, so it
+would be a strange thing to pre-specify; it is here to locate the boundary, not
+to recommend it.\n",
+max(prior_res$power) - min(prior_res$power),
+prior_res$sd[which.min(prior_res$precision)], prior_res$sd[tight],
+mean(prior_res$mc_se), n_total,
+prior_res$precision[tight], prior_res$sd[tight],
+beta_true, prior_res$post_mean[tight],
+prior_res$post_mean[tight] - beta_true, threshold))
 ```
 
 ## Frequentist comparator on identical data
 
-`design_weibull_cox()` shares the same DGP function, so any difference in power
-is attributable to the analysis model and not to a differently simulated trial.
+A Cox model on the same simulated trials, so any difference is attributable to
+the analysis and not to differently simulated data.
 
 ```{r cox, cache = TRUE}
-rc <- run_power(design_weibull_cox(), data.frame(n = c(120, 160, 200)),
-                n_sim = 1000, seed = 6026, verbose = FALSE)
-rb <- run_power(d, data.frame(n = c(120, 160, 200)),
-                n_sim = 1000, seed = 6026, verbose = FALSE)
+cox_res <- run_sim(1000, seed + 900, function() {
+  d <- simulate_trial(n_total, beta_true)
+  fit <- summary(coxph(Surv(time, status) ~ trt, data = d))$coefficients
+  c(reject = as.numeric(fit["trt", "Pr(>|z|)"] < 0.05))
+})
 ```
 
-```{r cox-table, echo = FALSE}
-kable(data.frame(
-  `Total n` = rc$n,
-  `Bayesian: Pr(HR>1) >= 0.90` = sprintf("%.3f", rb$power),
-  `Bayesian: 95% CrI excludes 1` = sprintf("%.3f", rb$reject_ci95),
-  `Cox: p < 0.05 (two-sided)` = sprintf("%.3f", rc$power),
-  check.names = FALSE
-), caption = "Same simulated trials, three decision rules.")
-```
-
-```{r cox-read, echo = FALSE, results = "asis"}
-i <- which(rc$n == 160)
+```{r cox-report, echo = FALSE, results = "asis"}
 cat(sprintf(
-"Two things to take from this. First, columns three and four agree closely -- at n = 160, %.3f against %.3f. That is the expected result and it is worth stating: with a treatment-effect prior this weak, a 95%% credible interval excluding the null behaves almost exactly like a two-sided 5%% test, so the Bayesian machinery is not smuggling in power through the back door. It is a useful internal consistency check on both implementations.\n\nSecond, the trial's actual decision rule -- a one-sided posterior probability above 0.90 -- gives %.3f, roughly %.0f points more. That gap is a deliberate design choice about how much evidence is required, not a modelling artefact, and it should be presented to reviewers and to the DSMB as such rather than compared silently against a conventional 5%% test.\n",
-rb$reject_ci95[i], rc$power[i], rb$power[i],
-100 * (rb$power[i] - rc$power[i])))
+"At n = %d the Bayesian 95%% credible interval excludes the null **%.3f** of the
+time and the Cox test rejects at p < 0.05 **%.3f** of the time. That agreement
+is the expected result and worth stating: with a treatment-effect prior this
+weak, a 95%% credible interval behaves almost exactly like a two-sided 5%% test,
+so the Bayesian machinery is not adding power through the back door. It is a
+useful consistency check on both implementations.
+
+The trial's actual decision rule — a one-sided posterior probability above
+%.2f — gives **%.3f**, roughly %.0f points more. That gap is a deliberate choice
+about how much evidence is required, not a modelling artefact, and should be
+presented to reviewers and to the DSMB as such rather than compared silently
+against a conventional 5%% test.\n",
+n_total, main$reject_ci95, cox_res$reject, threshold, main$reject,
+100 * (main$reject - cox_res$reject)))
 ```
+
+## Assumptions and limitations
+
+- Control-arm Weibull parameters are calibrated to empirical CHOP data; the
+  shape of 0.9 is estimated, not assumed exactly.
+- Death is treated as censoring for the cause-specific hazard of resolution.
+  That matches a cause-specific estimand, not a subdistribution one.
+- No dropout beyond the competing event and the 28-day horizon.
+- The simulation fits the same Weibull PH model that the SAP specifies. If the
+  analysis changes, re-run.
 
 ## Notes for reuse
 
-- **Different endpoint direction.** If the event is *bad* (death, readmission),
-  benefit is HR < 1: flip the sign of `beta` and read `reject` as
-  `Pr(HR < 1) >= threshold` by negating `beta.trt`.
-- **Different competing-risk structure.** `competing_dist = "weibull"` with
-  `shape_comp`/`scale_comp`, or `"none"` to switch it off.
-- **Exponential or piecewise baseline.** The exponential case is
-  `alpha` fixed at 1; a piecewise model needs a new `.jags` file but the same
-  `analyze()` skeleton.
-- **Runtime.** 1000 replicates × one JAGS chain of 5000 iterations is a few
-  minutes on 8 cores. Drop `n_iter` while exploring, raise it for the number
-  that goes in the application.
+- **Bad event** (death, readmission): benefit is HR < 1. Flip `beta_true` and
+  read the rule as `Pr(HR < 1) >= threshold`.
+- **Weibull competing event**: swap `rexp()` for `rweibull()` in
+  `simulate_trial()`.
+- **Exponential baseline**: fix `alpha` at 1 in the model string.
+- **Runtime**: about 13,000 JAGS fits, roughly 15 minutes cold on 8 cores. Keep
+  `cache = TRUE` on the compute chunks and `kable()` in separate chunks, so
+  editing a table does not re-run the simulation.
+
+## Reproducibility
 
 ```{r session, echo = FALSE}
 sessionInfo()$R.version$version.string
 ```
+
+Seeds are fixed in every call above.
