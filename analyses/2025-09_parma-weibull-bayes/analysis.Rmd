@@ -20,9 +20,9 @@ library(ggplot2)
 plan(multisession, workers = max(1, parallel::detectCores() - 1))
 ```
 
-Started from `templates/bayesian-survival.Rmd`. Self-contained — the JAGS model
-is written out below, and nothing is sourced from elsewhere. Needs JAGS
-installed (`brew install jags`).
+Self-contained — the JAGS model is written out below and nothing is sourced
+from elsewhere. Copy this folder to start a new time-to-event analysis. Needs
+JAGS installed (`brew install jags`).
 
 ## The question
 
@@ -79,11 +79,36 @@ leave the simulation running perfectly while powering the wrong effect, so it
 lives in a single function.
 
 ```{r param-helpers}
+## ---------------------------------------------------------------------------
+## scale_for_arm() — apply the treatment effect to the Weibull scale
+##
+## The single most important line in this document. Given the control arm's
+## scale and a target log hazard ratio, returns the scale the treated arm must
+## have for the hazard ratio to come out as intended.
+##
+## The division by `shape` is the part people get wrong. Writing
+## exp(-beta * trt) instead would produce a hazard ratio of exp(beta * shape),
+## so with shape = 0.9 you would silently power for HR = 1.53 while believing
+## you had specified 1.6. The DGP check further down exists to catch exactly
+## this, by fitting a Cox model to a huge simulated trial and confirming the
+## recovered log HR matches what was asked for.
+## ---------------------------------------------------------------------------
 scale_for_arm <- function(scale_ctrl, shape, beta, trt) {
   scale_ctrl * exp(-beta * trt / shape)
 }
+
+# The baseline intercept on the JAGS scale implied by the control arm above.
+# Used to centre the prior on beta0 honestly, rather than at a round number
+# that may not correspond to the data being simulated.
 beta0_true <- -shape * log(scale_ctrl)
 
+## ---------------------------------------------------------------------------
+## arm_summary() — mean and median survival time for a Weibull(shape, scale)
+##
+## Purely for reporting: converts the abstract scale parameter into days, so
+## the table below can be checked against how the design was described in
+## words. Standard results — the mean is b·Γ(1 + 1/a), the median b·(ln 2)^(1/a).
+## ---------------------------------------------------------------------------
 arm_summary <- function(b, a) c(mean = b * gamma(1 + 1 / a),
                                 median = b * log(2)^(1 / a))
 ctrl_s <- arm_summary(scale_ctrl, shape)
@@ -153,67 +178,176 @@ prior is not helping the trial find an effect.
 ## Machinery
 
 ```{r helpers}
+## ---------------------------------------------------------------------------
+## simulate_trial() — generate ONE hypothetical PARMA trial
+##
+##   n      number randomised
+##   beta   true log hazard ratio (positive = treated resolve sooner = benefit)
+##
+## Returns one row per participant with:
+##   trt     0 = low driving pressure (control), 1 = high
+##   time    the observed follow-up time, whatever happened first
+##   status  1 = hypoxemia resolved (the event we are powering for)
+##           0 = censored, either by death or by reaching day 28
+##   t_cen   the time this participant would have been censored at, which
+##           JAGS needs separately from `time` (see analyze_bayes below)
+## ---------------------------------------------------------------------------
 simulate_trial <- function(n, beta) {
+
+  # 1:1 randomisation.
   trt <- rbinom(n, 1, p_treat)
+
+  # Time to resolution, Weibull. scale_for_arm() applies the treatment effect
+  # by shifting the scale — see "The parameterisation" section above for why
+  # the exponent is -beta/shape and not -beta.
   t_event <- rweibull(n, shape, scale_for_arm(scale_ctrl, shape, beta, trt))
-  t_comp  <- rexp(n, rate = 1 / mean_comp)
-  # Competing event and horizon both act as right censoring for the
-  # cause-specific hazard of the primary event.
-  t_cen   <- pmin(t_comp, horizon)
-  data.frame(trt = trt,
-             time   = pmin(t_event, t_cen),
-             status = as.numeric(t_event <= t_cen),
-             t_cen  = t_cen)
+
+  # Time to death, the competing event. Exponential with a mean of `mean_comp`
+  # days. A child who dies never resolves, so this truncates follow-up.
+  t_comp <- rexp(n, rate = 1 / mean_comp)
+
+  # Both death and the 28-day horizon stop us observing resolution, so each
+  # participant is censored at whichever comes first. Treating the competing
+  # event as censoring is what makes this a CAUSE-SPECIFIC hazard model — the
+  # estimand is the rate of resolution among those still alive and unresolved,
+  # not the cumulative incidence. If the SAP wants a subdistribution hazard,
+  # this line and the model both need to change.
+  t_cen <- pmin(t_comp, horizon)
+
+  data.frame(
+    trt    = trt,
+    time   = pmin(t_event, t_cen),               # what we actually observe
+    status = as.numeric(t_event <= t_cen),       # did resolution come first?
+    t_cen  = t_cen
+  )
 }
 
+## ---------------------------------------------------------------------------
+## analyze_bayes() — fit the Weibull model to one trial and apply the rule
+##
+##   d          a trial from simulate_trial()
+##   beta       the true log HR, used only for the calibration diagnostic below
+##   trt_prec   precision of the prior on the treatment effect (varied in the
+##              prior sensitivity analysis)
+##   b0_mean    mean of the baseline prior (varied to reproduce the memo)
+##
+## Returns a named vector whose `reject` element is 1 when this trial would
+## have been declared a success. Averaging that over trials gives the power.
+## ---------------------------------------------------------------------------
 analyze_bayes <- function(d, beta, trt_prec = prior_trt_prec,
                           b0_mean = beta0_true) {
+
+  # Data passed to JAGS. Two things are doing real work here:
+  #
+  #  * `t` is set to NA wherever the participant was censored. JAGS treats NA
+  #    as a quantity to be sampled, and the dinterval() line in the model
+  #    constrains it to lie above t.cen. That is how censored observations
+  #    contribute information without us pretending to know their event time.
+  #
+  #  * N and every prior hyperparameter go in as DATA rather than being
+  #    hard-coded in the model string, which is why one model serves every
+  #    sample size and every prior in the sensitivity analyses below.
   jdata <- list(
-    N = nrow(d),
-    t = ifelse(d$status == 1, d$time, NA_real_),
-    t.cen = d$t_cen, trt = d$trt,
+    N           = nrow(d),
+    t           = ifelse(d$status == 1, d$time, NA_real_),
+    t.cen       = d$t_cen,
+    trt         = d$trt,
     is.censored = 1 - d$status,
-    prior_b0_mean = b0_mean, prior_b0_prec = prior_b0_prec,
+    prior_b0_mean  = b0_mean,     prior_b0_prec = prior_b0_prec,
     prior_trt_prec = trt_prec,
-    prior_a_shape = prior_a_shape, prior_a_rate = prior_a_rate
+    prior_a_shape  = prior_a_shape, prior_a_rate = prior_a_rate
   )
+
+  # Initial values. The censored event times must START above their censoring
+  # time or dinterval() is inconsistent at iteration zero and JAGS refuses to
+  # initialise — hence t_cen + 1. Uncensored entries are NA because they are
+  # observed data, not parameters.
   jinits <- list(list(t = ifelse(d$status == 0, d$t_cen + 1, NA_real_),
                       beta0 = b0_mean, beta.trt = 0))
 
+  # Compile, burn in, then draw the posterior. n.adapt tunes the samplers,
+  # update() discards the burn-in, coda.samples() collects the kept draws.
   jm <- jags.model(model_file, jdata, jinits, n.chains = 1,
                    n.adapt = 500, quiet = TRUE)
   update(jm, 1000, progress.bar = "none")
   s <- coda.samples(jm, c("beta0", "beta.trt", "alpha"),
                     n.iter = n_iter, progress.bar = "none")
 
+  # The posterior draws of the log hazard ratio. Everything below is a summary
+  # of this one vector.
   post <- as.numeric(s[[1]][, "beta.trt"])
-  q <- unname(quantile(post, c(0.025, 0.975)))
+  q    <- unname(quantile(post, c(0.025, 0.975)))
 
-  c(reject       = as.numeric(mean(post > 0) >= threshold),
-    # The same rule applied against the *assumed true* effect. The original
-    # memo reports this as its "type I error"; it is a calibration diagnostic,
-    # not a frequentist type I error rate, and should be described as such.
+  c(
+    # THE DECISION RULE. Not "p < 0.05" — the proportion of posterior draws
+    # above zero is Pr(HR > 1 | data), and the trial succeeds when that clears
+    # the pre-specified threshold. This is the quantity whose long-run
+    # frequency is the Bayesian power.
+    reject = as.numeric(mean(post > 0) >= threshold),
+
+    # The same rule applied against the *assumed true* effect rather than the
+    # null: how often we would claim more benefit than was actually built in.
+    # The original memo reports this as its "type I error". It is a
+    # calibration diagnostic, NOT a frequentist type I error rate, and should
+    # be described as what it is wherever it appears in a protocol.
     reject_truth = as.numeric(mean(post > beta) >= threshold),
-    reject_ci95  = as.numeric(q[1] > 0),
+
+    # A frequentist-style rule on the same posterior, for the comparison with
+    # Cox further down: does the 95% credible interval exclude no-effect?
+    reject_ci95 = as.numeric(q[1] > 0),
+
+    # Diagnostics, averaged across replicates and reported alongside the power.
+    # post_mean should land near the true beta; if it does not, the model and
+    # the data-generating process disagree about something.
     prob_benefit = mean(post > 0),
     post_mean    = mean(post),
-    event_frac   = mean(d$status))
+    event_frac   = mean(d$status)
+  )
 }
 
+## ---------------------------------------------------------------------------
+## run_sim() — repeat a simulated trial many times and summarise
+##
+##   n_sim    number of hypothetical trials
+##   seed     integer fixing the random number streams
+##   sim_one  zero-argument function returning one trial's analysed result
+##
+## Identical in purpose to the version in the PCORI document; the only thing
+## that differs between the two analyses is what sim_one() does.
+## ---------------------------------------------------------------------------
 run_sim <- function(n_sim, seed, sim_one) {
+
+  # Replicates run across CPU cores. Passing an integer to `future.seed` makes
+  # future build proper parallel RNG streams, so the result is identical on 1
+  # core or 10 — which set.seed() alone would not guarantee under parallelism.
+  #
+  # tryCatch returning NULL keeps one failed JAGS fit from killing the run.
   out <- future_lapply(seq_len(n_sim),
                        function(i) tryCatch(sim_one(), error = function(e) NULL),
                        future.seed = seed)
-  ok <- !vapply(out, is.null, logical(1))
+
+  # Count failures rather than dropping them. A model that only converges on
+  # the easy scenarios would otherwise look better than it is, so n_failed is
+  # reported in the results table and should be checked.
+  ok  <- !vapply(out, is.null, logical(1))
   est <- colMeans(do.call(rbind, out[ok]))
+
   power <- unname(est[["reject"]])
   ci <- wilson_ci(power, sum(ok))
   c(as.list(est), list(mc_se = sqrt(power * (1 - power) / sum(ok)),
                        lo = ci[1], hi = ci[2], n_failed = sum(!ok)))
 }
 
+## ---------------------------------------------------------------------------
+## wilson_ci() — interval for the SIMULATION's precision, not the trial's
+##
+## Answers "how much would this power estimate move under a different seed?",
+## which is what tells you whether a gap between two scenarios is signal or
+## noise. Wilson rather than Wald because Wald collapses to a point at power
+## near 0 or 1, and several scenarios here sit above 0.95.
+## ---------------------------------------------------------------------------
 wilson_ci <- function(p, n, z = 1.96) {
-  d <- 1 + z^2 / n
+  d      <- 1 + z^2 / n
   centre <- (p + z^2 / (2 * n)) / d
   half   <- z / d * sqrt(p * (1 - p) / n + z^2 / (4 * n^2))
   c(max(0, centre - half), min(1, centre + half))

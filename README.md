@@ -4,8 +4,10 @@ A record of the power and sample size analyses the group has run, so that when a
 new project starts you can find the closest thing we've already done and work
 from it rather than from scratch.
 
-Two parts: an **index** of completed analyses, and a **template** for each design
-type to start a new one from.
+Scan the index, open the nearest analysis, copy the folder, change the numbers.
+There are no separate templates — **the completed analyses are the templates**,
+which keeps one copy of everything rather than a skeleton that quietly drifts
+out of step with the real work.
 
 ## Index
 
@@ -30,39 +32,51 @@ entries are described the same way.
 | **Key design features** | The things that determine whether this analysis is worth copying: clustering and ICC, repeated measures, multiplicity, competing risks, interim analyses, sample size constraints |
 | **Code** | Link to the analysis document |
 
-## Templates
+## How the documents are built
 
-| Template | Use it for |
+**Each analysis is a single self-contained R Markdown file.** Nothing is
+`source()`d — the simulation loop, the data-generating model, the analysis, and
+(for the Bayesian one) the JAGS model all live in the file you're reading. There
+is no package to install and no framework to learn. You can read one top to
+bottom, and you can copy one somewhere else and it still runs.
+
+Every function is commented in detail, including why it is written the way it
+is, so the parts that are easy to get wrong — the parallel random number seeds,
+the Weibull parameterisation, the handling of censored observations — say so
+where you meet them.
+
+They share a common shape:
+
+| Section | What it does |
 |---|---|
-| [`templates/binary-parallel.Rmd`](templates/binary-parallel.Rmd) | Parallel-arm trial, binary outcome. Multiplicity, subgroup power, exact power validation. |
-| [`templates/bayesian-survival.Rmd`](templates/bayesian-survival.Rmd) | Parallel-arm trial, time-to-event outcome, Bayesian analysis. Weibull PH in JAGS, competing risks, posterior-probability decision rule. |
-
-Both run as-is with placeholder numbers, so knit one before changing anything and
-confirm you get output.
-
-**Each document is self-contained.** Nothing is `source()`d — the simulation
-loop, the analysis, and (for the Bayesian one) the JAGS model all live in the
-file you're reading. You can copy a single `.Rmd` somewhere else and it still
-works, and you can read one top to bottom without following anything into a
-library.
+| The question | The design in plain sentences, including where each assumed number came from |
+| Assumptions | Every parameter the simulation depends on, in one chunk |
+| Machinery | The commented helper functions |
+| Validation | Checks the simulation against something computed a different way |
+| Results | Power tables and plots |
+| Sensitivity | Varies whatever was least certain in "The question" |
+| Assumptions and limitations | What the simulation does *not* represent |
 
 ## Adding an analysis
 
-1. Copy the closest template — or the closest completed analysis, if one of them
-   is nearer to your design.
+1. Find the nearest row in the index and copy that folder. Use `YYYY-MM_slug` so
+   it sorts chronologically.
 
    ```
-   mkdir analyses/2026-11_my-trial
-   cp templates/binary-parallel.Rmd analyses/2026-11_my-trial/analysis.Rmd
+   cp -r analyses/2026-09_pcori-3arm-binary analyses/2026-11_my-trial
    ```
 
-   Use `YYYY-MM_slug` so the folder sorts chronologically.
-
-2. Work through it top to bottom, replacing the placeholder numbers.
+2. Work through it top to bottom, replacing the numbers. The Assumptions chunk
+   is where most of the editing happens; `simulate_one()` (or
+   `simulate_trial()`) is the only function you are likely to rewrite.
 
 3. Add a row to the index table above.
 
-Two conventions worth keeping, both of which the templates already follow:
+If nothing in the index is close — a stepped-wedge design, say — start from
+whichever is nearest structurally and replace the data-generating function. The
+surrounding machinery does not care what the outcome type is.
+
+Two conventions worth keeping, both of which the existing analyses follow:
 
 - **Validate against something.** If the design has a closed form, check the
   simulation against it and show the comparison. If it doesn't, verify the
@@ -91,7 +105,7 @@ R ≥ 4.4, and:
 ```r
 install.packages(c("future.apply", "knitr", "ggplot2", "rmarkdown"))
 
-# time-to-event templates only
+# time-to-event analyses only
 install.packages(c("survival", "rjags"))   # rjags needs JAGS: brew install jags
 ```
 
@@ -103,4 +117,5 @@ still run a document end to end with `knitr::knit("analysis.Rmd")`.
 Designs we've hit before and haven't written up yet, roughly in order of how
 often they come up: **stepped-wedge**, **continuous outcomes with repeated
 measures**, **cluster-randomised with an ICC**, **ordinal outcomes**, and
-**group-sequential designs with interim analyses**. Each is a new template.
+**group-sequential designs with interim analyses**. Each is a new analysis
+folder, started from whichever existing one is closest.

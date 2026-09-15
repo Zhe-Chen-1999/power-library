@@ -18,8 +18,8 @@ library(ggplot2)
 plan(multisession, workers = max(1, parallel::detectCores() - 1))
 ```
 
-Started from `templates/binary-parallel.Rmd`. Self-contained — nothing is
-sourced from elsewhere.
+Self-contained — nothing is sourced from elsewhere. Copy this folder to start
+a new binary-outcome analysis.
 
 ## The question
 
@@ -63,53 +63,176 @@ diffs    <- c(0.050, 0.075, 0.100)
 ## Machinery
 
 ```{r helpers}
-# One simulated two-arm comparison.
+## ---------------------------------------------------------------------------
+## simulate_one() — generate and analyse ONE hypothetical trial
+##
+## This is the heart of the simulation, and the only function you need to
+## rewrite if the design changes. Everything else is bookkeeping.
+##
+##   p_control   true event rate in the control arm
+##   p_treat     true event rate in the active arm (the alternative we power for)
+##   n_per_arm   participants in each arm
+##   alpha_test  the level THIS test uses, already Bonferroni-adjusted
+##
+## Returns a named vector that must contain `reject` — 1 if this simulated
+## trial would have declared a significant difference, 0 if not. Averaging
+## `reject` over many trials is the power. Anything else returned here is
+## averaged and reported alongside it, which is a convenient way to check the
+## simulation is doing what you think (e.g. add `risk_diff` to confirm the
+## realised effect matches the one you specified).
+## ---------------------------------------------------------------------------
 simulate_one <- function(p_control, p_treat, n_per_arm, alpha_test) {
+
+  # Each participant is an independent coin flip at their arm's event rate.
+  # This is the data-generating model: no clustering, no covariates, no
+  # dropout. If the real trial has any of those, this line is what changes.
   y0 <- rbinom(n_per_arm, 1, p_control)
   y1 <- rbinom(n_per_arm, 1, p_treat)
+
+  # The analysis: an uncorrected two-sample test of proportions. `correct =
+  # FALSE` turns OFF the continuity correction, which matters for two reasons.
+  # It is what power.prop.test() assumes, and it is what power_exact() below
+  # enumerates — so all three refer to the same test and can be compared.
+  # suppressWarnings() silences the chi-square approximation warning that
+  # fires on sparse tables; those cases are handled explicitly on the next line.
   pv <- suppressWarnings(
     prop.test(c(sum(y1), sum(y0)), c(n_per_arm, n_per_arm), correct = FALSE)$p.value
   )
-  if (!is.finite(pv)) pv <- 1      # degenerate table: no evidence, no rejection
+
+  # A table with no events at all (or no non-events) in either arm gives a 0/0
+  # test statistic and a NaN p-value. There is genuinely no evidence against
+  # the null in that situation, so treat it as a non-rejection. Letting NaN
+  # through would silently drop the replicate from the average instead, which
+  # would bias the power upward by discarding only uninformative trials.
+  if (!is.finite(pv)) pv <- 1
+
   c(reject = as.numeric(pv < alpha_test))
 }
 
+## ---------------------------------------------------------------------------
+## run_sim() — repeat a simulated trial many times and summarise
+##
+##   n_sim    number of hypothetical trials to run
+##   seed     integer fixing the random number streams
+##   sim_one  a zero-argument function returning one trial's result, i.e. a
+##            closure wrapping simulate_one() with its parameters filled in
+##
+## Returns a list with `reject` (the power), its Monte Carlo standard error,
+## a 95% interval for it, the number of failed replicates, and the mean of
+## everything else sim_one() returned.
+## ---------------------------------------------------------------------------
 run_sim <- function(n_sim, seed, sim_one) {
+
+  # future_lapply() spreads the replicates across CPU cores. Passing an integer
+  # to `future.seed` makes it build proper parallel random number streams from
+  # that seed, so the answer is identical whether you run on 1 core or 10.
+  # Using set.seed() with parallel workers would NOT give that guarantee.
+  #
+  # tryCatch returning NULL means one bad replicate cannot kill the whole run;
+  # failures are counted below rather than crashing or being ignored.
   out <- future_lapply(seq_len(n_sim),
                        function(i) tryCatch(sim_one(), error = function(e) NULL),
                        future.seed = seed)
-  ok <- !vapply(out, is.null, logical(1))
-  est <- colMeans(do.call(rbind, out[ok]))
+
+  # Separate the usable replicates from the failed ones. Reporting n_failed
+  # matters: silently averaging over "whatever worked" would make a design
+  # that only converges on easy scenarios look better than it is.
+  ok  <- !vapply(out, is.null, logical(1))
+  est <- colMeans(do.call(rbind, out[ok]))   # mean of every returned quantity
+
+  # The power is the mean of `reject`, i.e. the proportion of simulated trials
+  # that reached significance.
   power <- unname(est[["reject"]])
   ci <- wilson_ci(power, sum(ok))
+
   c(as.list(est), list(mc_se = sqrt(power * (1 - power) / sum(ok)),
                        lo = ci[1], hi = ci[2], n_failed = sum(!ok)))
 }
 
+## ---------------------------------------------------------------------------
+## wilson_ci() — confidence interval for a simulated proportion
+##
+## This quantifies the SIMULATION's precision, not the trial's. It answers
+## "if I re-ran these 20,000 replicates with a different seed, how much would
+## the power estimate move?" — which is what tells you whether a difference
+## between two scenarios is real or just noise.
+##
+## Wilson rather than the textbook Wald interval (p ± 1.96·SE) because Wald
+## collapses to a single point when power hits 0 or 1. That is exactly where
+## the validation below needs a sensible interval, since several scenarios sit
+## at power ≈ 0.99.
+## ---------------------------------------------------------------------------
 wilson_ci <- function(p, n, z = 1.96) {
-  d <- 1 + z^2 / n
+  d      <- 1 + z^2 / n
   centre <- (p + z^2 / (2 * n)) / d
   half   <- z / d * sqrt(p * (1 - p) / n + z^2 / (4 * n^2))
   c(max(0, centre - half), min(1, centre + half))
 }
 
-# Exact power of the test above, by enumerating every 2x2 table the trial
-# could produce. This is the yardstick the simulation is checked against.
+## ---------------------------------------------------------------------------
+## power_exact() — the true power of the test, with no simulation at all
+##
+## A trial with n participants per arm can only produce a finite number of
+## outcomes: x1 events in the treated arm (0 to n1) crossed with x0 in the
+## control arm (0 to n0). This function walks over EVERY one of those tables,
+## works out which would reject, and adds up their probabilities. The result
+## is exact — no Monte Carlo error, no normal approximation.
+##
+## That makes it the right yardstick for checking the simulation. Comparing
+## against power.prop.test() instead would be weaker, because it is itself a
+## normal approximation and runs up to ~0.02 conservative at n = 150 per arm;
+## agreement with it cannot distinguish "the simulation is correct" from "both
+## approximations are wrong in the same direction".
+##
+## Cost is an (n1+1) x (n0+1) grid, so it is cheap here (1001 x 1001) but not
+## something to call at n = 50,000.
+## ---------------------------------------------------------------------------
 power_exact <- function(n1, n0, p1, p0, alpha) {
-  x1 <- 0:n1; x0 <- 0:n0
+  x1 <- 0:n1; x0 <- 0:n0                      # every possible event count
+
+  # Pooled proportion under the null, for each (x1, x0) pair. outer() builds
+  # the full grid of combinations in one shot rather than looping.
   pbar <- outer(x1, x0, "+") / (n1 + n0)
   se   <- sqrt(pbar * (1 - pbar) * (1 / n1 + 1 / n0))
-  z    <- outer(x1 / n1, x0 / n0, "-") / se
-  rej  <- is.finite(z) & abs(z) > qnorm(1 - alpha / 2)
+
+  # The test statistic for each table. This is the same pooled-variance z test
+  # that prop.test(correct = FALSE) computes in simulate_one().
+  z <- outer(x1 / n1, x0 / n0, "-") / se
+
+  # is.finite() drops the degenerate tables where se = 0, matching the
+  # non-rejection convention used in simulate_one().
+  rej <- is.finite(z) & abs(z) > qnorm(1 - alpha / 2)
+
+  # Probability of each table under the true rates, summed over the rejecting
+  # ones. The two arms are independent, so the joint probability is a product.
   sum(outer(dbinom(x1, n1, p1), dbinom(x0, n0, p0))[rej])
 }
 
+## ---------------------------------------------------------------------------
+## req_n() — required sample size per arm, from the closed-form formula
+##
+## Inverts power.prop.test(): instead of "what power does n give?", asks "what
+## n gives 80% power?". Uses the normal approximation rather than the exact
+## enumeration above, deliberately — this is the number that goes in a protocol
+## and that a reviewer will reproduce by hand. It is mildly conservative, so
+## the required n errs slightly large, which is the safe direction.
+##
+## ceiling() because you cannot enrol a fraction of a participant.
+## ---------------------------------------------------------------------------
 req_n <- function(p0, p1, alpha, target = 0.80) {
   ceiling(power.prop.test(p1 = p0, p2 = p1, sig.level = alpha,
                           power = target, alternative = "two.sided")$n)
 }
 
-# Percentages that don't round 37.5% to "38%" — these tables are read row by row.
+## ---------------------------------------------------------------------------
+## pct() — format a proportion as a percentage for the tables
+##
+## Exists because sprintf("%.0f%%", 37.5) gives "38%", and these tables are
+## read row by row by clinicians choosing the row that matches their beliefs.
+## A 7.5-point effect silently displayed as a 7-point one is the kind of error
+## nobody catches. formatC(format = "fg", digits = 3) keeps the half-points;
+## trimws() strips the padding formatC adds to align a vector.
+## ---------------------------------------------------------------------------
 pct <- function(x) paste0(trimws(formatC(x * 100, format = "fg", digits = 3)), "%")
 ```
 
