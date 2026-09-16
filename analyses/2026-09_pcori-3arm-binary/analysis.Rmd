@@ -20,7 +20,7 @@ plan(multisession, workers = max(1, parallel::detectCores() - 1))
 
 ## The question
 
-Three arms — one control and two **different** active interventions — with a budget of N = 3000, so 1000 per arm. The clinicians need to read two
+Three arms — one control and two different active interventions — with a budget of N = 3000, so 1000 per arm. The clinicians need to read two
 things straight off a table:
 
 1. How large does an arm have to be to detect a given improvement over control?
@@ -53,26 +53,21 @@ controls <- seq(0.30, 0.50, by = 0.05)
 diffs    <- c(0.050, 0.075, 0.100)
 ```
 
-## Machinery
+## Helper functions
 
 ```{r helpers}
 ## ---------------------------------------------------------------------------
 ## simulate_one() — generate and analyse ONE hypothetical trial
 ##
-## This is the heart of the simulation, and the only function you need to
-## rewrite if the design changes. Everything else is bookkeeping.
-##
+## This is the function you need to rewrite if the design changes. 
 ##   p_control   true event rate in the control arm
 ##   p_treat     true event rate in the active arm (the alternative we power for)
 ##   n_per_arm   participants in each arm
-##   alpha_test  the level THIS test uses, already Bonferroni-adjusted
+##   alpha_test  the level this test uses, already Bonferroni-adjusted
 ##
 ## Returns a named vector that must contain `reject` — 1 if this simulated
 ## trial would have declared a significant difference, 0 if not. Averaging
-## `reject` over many trials is the power. Anything else returned here is
-## averaged and reported alongside it, which is a convenient way to check the
-## simulation is doing what you think (e.g. add `risk_diff` to confirm the
-## realised effect matches the one you specified).
+## `reject` over many trials is the power. 
 ## ---------------------------------------------------------------------------
 simulate_one <- function(p_control, p_treat, n_per_arm, alpha_test) {
 
@@ -119,7 +114,7 @@ run_sim <- function(n_sim, seed, sim_one) {
   # future_lapply() spreads the replicates across CPU cores. Passing an integer
   # to `future.seed` makes it build proper parallel random number streams from
   # that seed, so the answer is identical whether you run on 1 core or 10.
-  # Using set.seed() with parallel workers would NOT give that guarantee.
+  # Using set.seed() with parallel workers would not give that guarantee.
   #
   # tryCatch returning NULL means one bad replicate cannot kill the whole run;
   # failures are counted below rather than crashing or being ignored.
@@ -150,7 +145,7 @@ run_sim <- function(n_sim, seed, sim_one) {
 ## the power estimate move?" — which is what tells you whether a difference
 ## between two scenarios is real or just noise.
 ##
-## Wilson rather than the textbook Wald interval (p ± 1.96·SE) because Wald
+## Wilson rather than the Wald interval (p ± 1.96·SE) because Wald
 ## collapses to a single point when power hits 0 or 1. That is exactly where
 ## the validation below needs a sensible interval, since several scenarios sit
 ## at power ≈ 0.99.
@@ -173,18 +168,15 @@ wilson_ci <- function(p, n, z = 1.96) {
 ##
 ## That makes it the right yardstick for checking the simulation. Comparing
 ## against power.prop.test() instead would be weaker, because it is itself a
-## normal approximation and runs up to ~0.02 conservative at n = 150 per arm;
-## agreement with it cannot distinguish "the simulation is correct" from "both
-## approximations are wrong in the same direction".
+## normal approximation and runs up to ~0.02 conservative at n = 150 per arm.
 ##
-## Cost is an (n1+1) x (n0+1) grid, so it is cheap here (1001 x 1001) but not
-## something to call at n = 50,000.
+## Cost is an (n1+1) x (n0+1) grid.
 ## ---------------------------------------------------------------------------
 power_exact <- function(n1, n0, p1, p0, alpha) {
   x1 <- 0:n1; x0 <- 0:n0                      # every possible event count
 
   # Pooled proportion under the null, for each (x1, x0) pair. outer() builds
-  # the full grid of combinations in one shot rather than looping.
+  # the full grid of combinations.
   pbar <- outer(x1, x0, "+") / (n1 + n0)
   se   <- sqrt(pbar * (1 - pbar) * (1 / n1 + 1 / n0))
 
@@ -206,11 +198,8 @@ power_exact <- function(n1, n0, p1, p0, alpha) {
 ##
 ## Inverts power.prop.test(): instead of "what power does n give?", asks "what
 ## n gives 80% power?". Uses the normal approximation rather than the exact
-## enumeration above, deliberately — this is the number that goes in a protocol
-## and that a reviewer will reproduce by hand. It is mildly conservative, so
-## the required n errs slightly large, which is the safe direction.
+## enumeration above. 
 ##
-## ceiling() because you cannot enrol a fraction of a participant.
 ## ---------------------------------------------------------------------------
 req_n <- function(p0, p1, alpha, target = 0.80) {
   ceiling(power.prop.test(p1 = p0, p2 = p1, sig.level = alpha,
@@ -222,8 +211,7 @@ req_n <- function(p0, p1, alpha, target = 0.80) {
 ##
 ## Exists because sprintf("%.0f%%", 37.5) gives "38%", and these tables are
 ## read row by row by clinicians choosing the row that matches their beliefs.
-## A 7.5-point effect silently displayed as a 7-point one is the kind of error
-## nobody catches. formatC(format = "fg", digits = 3) keeps the half-points;
+## formatC(format = "fg", digits = 3) keeps the half-points;
 ## trimws() strips the padding formatC adds to align a vector.
 ## ---------------------------------------------------------------------------
 pct <- function(x) paste0(trimws(formatC(x * 100, format = "fg", digits = 3)), "%")
