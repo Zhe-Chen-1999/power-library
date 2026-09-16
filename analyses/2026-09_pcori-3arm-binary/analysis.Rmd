@@ -290,6 +290,8 @@ cat(sprintf(
 this a sharp test: the exact value falls inside the simulation's 95%% interval
 in **%d of %d** scenarios, with a largest absolute discrepancy of %.4f.
 
+format(n_sim, big.mark = ","), mean(T1b$mc_se), sum(T1b$within), nrow(T1b),
+max(abs(T1b$sim - T1b$exact))))
 ```
 
 ## Table 2 — active 1 vs. active 2
