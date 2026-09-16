@@ -18,29 +18,22 @@ library(ggplot2)
 plan(multisession, workers = max(1, parallel::detectCores() - 1))
 ```
 
-Self-contained — nothing is sourced from elsewhere. Copy this folder to start
-a new binary-outcome analysis.
-
 ## The question
 
-Three arms — one control and two **different** active interventions — with a
-fixed budget of **N = 3000**, so 1000 per arm. The clinicians need to read two
+Three arms — one control and two **different** active interventions — with a budget of N = 3000, so 1000 per arm. The clinicians need to read two
 things straight off a table:
 
 1. How large does an arm have to be to detect a given improvement over control?
-2. At the budget we actually have, what can we detect — overall, and within the
+2. At the budget we actually have, what can we detect overall, and within the
    rural and urban subgroups?
 
-The two active arms are **not** assumed to have the same effect. Every table
-varies one arm at a time, so a reader can pick the row matching whatever they
-believe about each intervention separately.
 
 ### Multiplicity
 
 Two primary comparisons, each active against control → Bonferroni
 **α = 0.025**. If the active-versus-active contrast is also treated as
 confirmatory, three pairwise comparisons → **α = 0.0167**. Both appear below.
-Which one applies is a protocol decision, not a statistical one.
+Which one applies is a protocol decision.
 
 ## Assumptions
 
@@ -278,7 +271,7 @@ for (i in seq_len(nrow(T1b))) {
 T1b$within <- T1b$exact >= T1b$lo & T1b$exact <= T1b$hi
 ```
 
-```{r t1b-table, echo = FALSE}
+```{r t1b-table, echo = TRUE}
 kable(data.frame(
   Control = pct(T1b$control),
   Active  = pct(T1b$active),
@@ -297,19 +290,11 @@ cat(sprintf(
 this a sharp test: the exact value falls inside the simulation's 95%% interval
 in **%d of %d** scenarios, with a largest absolute discrepancy of %.4f.
 
-A 95%% interval is expected to miss about %.1f times in %d by chance alone, so
-%d outside is unremarkable — it would take several before the agreement looked
-suspect. What matters is that nothing is off by a *practically* meaningful
-amount, and nothing is: %.4f on powers running from 0.5 to 0.99 would not move
-a single sample size decision.\n",
-format(n_sim, big.mark = ","), mean(T1b$mc_se), sum(T1b$within), nrow(T1b),
-max(abs(T1b$sim - T1b$exact)), 0.05 * nrow(T1b), nrow(T1b),
-nrow(T1b) - sum(T1b$within), max(abs(T1b$sim - T1b$exact))))
 ```
 
 ## Table 2 — active 1 vs. active 2
 
-The secondary contrast. Gaps are smaller here, since both arms are active.
+The secondary contrast. 
 
 ```{r t2}
 active1s <- c(0.30, 0.35, 0.40, 0.45, 0.50)
@@ -320,13 +305,23 @@ T2 <- T2[order(T2$active1, T2$gap), ]
 T2$active2   <- T2$active1 + T2$gap
 T2$n_a05     <- mapply(req_n, T2$active1, T2$active2, alpha)
 T2$n_a0167   <- mapply(req_n, T2$active1, T2$active2, alpha_3)
-T2$pow_a05   <- mapply(function(a, b) power.prop.test(n_arm, a, b, alpha)$power,
-                       T2$active1, T2$active2)
-T2$pow_a0167 <- mapply(function(a, b) power.prop.test(n_arm, a, b, alpha_3)$power,
+T2$pow_a05 <- mapply(
+  function(a, b)
+    power.prop.test(
+      n = n_arm,
+      p1 = a,
+      p2 = b,
+      sig.level = alpha,
+      alternative = "two.sided"
+    )$power,
+  T2$active1,
+  T2$active2
+)
+T2$pow_a0167 <- mapply(function(a, b) power.prop.test(n_arm, a, b, alpha_3, "two.sided")$power,
                        T2$active1, T2$active2)
 ```
 
-```{r t2-table, echo = FALSE}
+```{r t2-table, echo = TRUE}
 kable(data.frame(
   `Active 1` = pct(T2$active1),
   `Active 2` = pct(T2$active2),
@@ -336,13 +331,13 @@ kable(data.frame(
   `Power at 1000/arm, alpha = 0.05`   = sprintf("%.3f", T2$pow_a05),
   `Power at 1000/arm, alpha = 0.0167` = sprintf("%.3f", T2$pow_a0167),
   check.names = FALSE
-), caption = "Active 1 vs. Active 2: required n and power at the budget.")
+), caption = "Active 1 vs. Active 2: required n per arm (80% power) and power at the budget.")
 ```
 
 ## Table 3 — subgroup power
 
 At the budget each arm contributes **333 rural** and **667 urban** participants.
-Subgroup power is the same calculation at a smaller n — no new machinery.
+Subgroup power is the same calculation at a smaller n.
 
 ```{r t3, cache = TRUE}
 baselines <- c(0.25, 0.30, 0.35, 0.40, 0.45, 0.50)
@@ -372,7 +367,7 @@ kable(data.frame(
 ), caption = "Within-subgroup power at the budget, alpha = 0.025.")
 ```
 
-```{r t3-plot, echo = FALSE}
+```{r t3-plot, echo = TRUE}
 pd <- rbind(
   data.frame(T3[c("control", "diff")], power = T3$rural, subgroup = "Rural (333/arm)"),
   data.frame(T3[c("control", "diff")], power = T3$urban, subgroup = "Urban (667/arm)")
@@ -424,17 +419,6 @@ mde(n_urban, 0.40, alpha_2) * 100,
 mde(n_rural, 0.40, alpha_2) * 100))
 ```
 
-## Assumptions and limitations
-
-- Control event rates are a range rather than a point estimate, which is why
-  every table varies them — the LOI does not commit to one.
-- No allowance for dropout. If the outcome can be missing, inflate N
-  accordingly or add it to the simulation.
-- The simulated test is the uncorrected two-sample comparison of proportions.
-  If the SAP specifies a covariate-adjusted model, power will differ somewhat.
-- Nothing here represents site effects, clustering by clinician, or interim
-  analyses.
-
 ## Notes for reuse
 
 - **Unequal allocation.** Give `simulate_one()` separate arm sizes and pass both
@@ -444,8 +428,4 @@ mde(n_rural, 0.40, alpha_2) * 100))
   chi-square test, so it stops being the right yardstick.
 - **Subgroups** need nothing new: run the same calculation at the stratum size.
 
-## Reproducibility
 
-```{r session, echo = FALSE}
-sessionInfo()$R.version$version.string
-```
