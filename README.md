@@ -13,10 +13,6 @@ from it rather than from scratch.
 
 ### Column conventions
 
-Keep these consistent — the value of the index is being able to scan it for
-"anything with an ICC" or "any Bayesian time-to-event", and that only works if
-entries are described the same way.
-
 | Column | What goes in it |
 |---|---|
 | **Study** | Trial or grant name, year, a one-line description, then analyst and status on a second line. Status is `draft`, `final`, or `used in submission`. |
@@ -31,14 +27,8 @@ entries are described the same way.
 
 **Each analysis is a single self-contained R Markdown file.** Nothing is
 `source()`d — the simulation loop, the data-generating model, the analysis, and
-(for the Bayesian one) the JAGS model all live in the file you're reading. There
-is no package to install and no framework to learn. You can read one top to
-bottom, and you can copy one somewhere else and it still runs.
-
-Every function is commented in detail, including why it is written the way it
-is, so the parts that are easy to get wrong — the parallel random number seeds,
-the Weibull parameterisation, the handling of censored observations — say so
-where you meet them.
+(for the Bayesian one) the JAGS model all live in the file you're reading. 
+Every function is commented in detail.
 
 They share a common shape:
 
@@ -67,18 +57,11 @@ They share a common shape:
 
 3. Add a row to the index table above.
 
-If nothing in the index is close — a stepped-wedge design, say — start from
-whichever is nearest structurally and replace the data-generating function. The
-surrounding machinery does not care what the outcome type is.
-
-Two conventions worth keeping, both of which the existing analyses follow:
+Conventions worth keeping:
 
 - **Validate against something.** If the design has a closed form, check the
   simulation against it and show the comparison. If it doesn't, verify the
   data-generating model recovers the effect you asked for, and report the type I
   error under the null. A simulation that produces a number is not the same as
   one that produces the right number.
-- **Keep `kable()` out of cached chunks.** Put the computation in a chunk with
-  `cache = TRUE` and the table in a separate chunk. Otherwise fixing a typo
-  re-runs the simulation, which for a JAGS design means waiting fifteen minutes.
 
