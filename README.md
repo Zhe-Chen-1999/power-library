@@ -82,35 +82,3 @@ Two conventions worth keeping, both of which the existing analyses follow:
   `cache = TRUE` and the table in a separate chunk. Otherwise fixing a typo
   re-runs the simulation, which for a JAGS design means waiting fifteen minutes.
 
-## Runtime
-
-The binary designs are effectively free — thousands of replicates a second, and
-the PCORI document knits in about 15 seconds.
-
-JAGS is not. One fit is roughly 60 ms, so a 1000-replicate scenario takes about a
-minute on 8 cores, and the PARMA document is around 13,000 fits — about 15
-minutes from a cold cache. While exploring, drop `n_sim` and `n_iter`; raise them
-only for the numbers that go into the application. The reported `mc_se` tells you
-when they're high enough.
-
-## Requirements
-
-R ≥ 4.4, and:
-
-```r
-install.packages(c("future.apply", "knitr", "ggplot2", "rmarkdown"))
-
-# time-to-event analyses only
-install.packages(c("survival", "rjags"))   # rjags needs JAGS: brew install jags
-```
-
-Rendering to HTML also needs `pandoc` (`brew install pandoc`). Without it you can
-still run a document end to end with `knitr::knit("analysis.Rmd")`.
-
-## Gaps
-
-Designs we've hit before and haven't written up yet, roughly in order of how
-often they come up: **stepped-wedge**, **continuous outcomes with repeated
-measures**, **cluster-randomised with an ICC**, **ordinal outcomes**, and
-**group-sequential designs with interim analyses**. Each is a new analysis
-folder, started from whichever existing one is closest.
