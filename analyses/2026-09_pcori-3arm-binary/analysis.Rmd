@@ -288,7 +288,7 @@ kable(data.frame(
 cat(sprintf(
 "At %s replicates per scenario the Monte Carlo SE is about %.4f, which makes
 this a sharp test: the exact value falls inside the simulation's 95%% interval
-in **%d of %d** scenarios, with a largest absolute discrepancy of %.4f.
+in **%d of %d** scenarios, with a largest absolute discrepancy of %.4f.",
 
 format(n_sim, big.mark = ","), mean(T1b$mc_se), sum(T1b$within), nrow(T1b),
 max(abs(T1b$sim - T1b$exact))))
@@ -319,7 +319,7 @@ T2$pow_a05 <- mapply(
   T2$active1,
   T2$active2
 )
-T2$pow_a0167 <- mapply(function(a, b) power.prop.test(n_arm, a, b, alpha_3, "two.sided")$power,
+T2$pow_a0167 <- mapply(function(a, b) power.prop.test(n_arm, a, b, alpha_3)$power,
                        T2$active1, T2$active2)
 ```
 
@@ -429,5 +429,4 @@ mde(n_rural, 0.40, alpha_2) * 100))
   model — but note the exact enumeration is specific to the uncorrected
   chi-square test, so it stops being the right yardstick.
 - **Subgroups** need nothing new: run the same calculation at the stratum size.
-
 
