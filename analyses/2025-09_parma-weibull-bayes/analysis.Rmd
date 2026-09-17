@@ -1,7 +1,7 @@
 ---
 title: "PARMA — Bayesian power for a Weibull time-to-event endpoint"
 subtitle: "Time to resolution of hypoxemia, high vs. low driving pressure in pediatric ARDS"
-author: "Zhe Chen, with Nadir Yehya"
+author: "Zhe Chen"
 date: "September 2025"
 output:
   html_document:
@@ -19,10 +19,6 @@ library(knitr)
 library(ggplot2)
 plan(multisession, workers = max(1, parallel::detectCores() - 1))
 ```
-
-Self-contained — the JAGS model is written out below and nothing is sourced
-from elsewhere. Copy this folder to start a new time-to-event analysis. Needs
-JAGS installed (`brew install jags`).
 
 ## The question
 
