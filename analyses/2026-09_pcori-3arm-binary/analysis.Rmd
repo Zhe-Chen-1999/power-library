@@ -354,9 +354,9 @@ T3 <- expand.grid(control = baselines, diff = effects)
 T3 <- T3[order(T3$control, T3$diff), ]
 T3$active <- T3$control + T3$diff
 
-T3$rural <- mapply(function(p0, p1) power.prop.test(n_rural, p0, p1, alpha_2),
+T3$rural <- mapply(function(p0, p1) power.prop.test(n_rural, p0, p1, alpha_2)$power,
                    T3$control, T3$active)
-T3$urban <- mapply(function(p0, p1) power.prop.test(n_urban, p0, p1, alpha_2),
+T3$urban <- mapply(function(p0, p1) power.prop.test(n_urban, p0, p1, alpha_2)$power,
                    T3$control, T3$active)
 ```
 
