@@ -8,8 +8,7 @@ from it rather than from scratch.
 
 | Study | Outcome | Framework | Arms | Design | Key design features | Code |
 |---|---|---|---|---|---|---|
-| **PCORI LOI** (2026)<br><sub>Three-arm pragmatic trial </sub><br><sub>Zhe Chen | Binary | frequentist | 3 | Parallel-arm, individually randomised | 
-Two active arms vs usual care; pairwise comparisons tested at Bonferroni-adjusted significance level; rural/urban subgroups | [analysis.Rmd](analyses/2026-09_pcori-3arm-binary/analysis.Rmd) |
+| **PCORI LOI** (2026)<br><sub>Three-arm pragmatic trial </sub><br><sub>Zhe Chen | Binary | frequentist | 3 | Parallel-arm, individually randomised | Two active arms vs usual care; pairwise comparisons tested at Bonferroni-adjusted significance level; rural/urban subgroups | [analysis.Rmd](analyses/2026-09_pcori-3arm-binary/analysis.Rmd) |
 | **PARMA** (2025)<br><sub>Pediatric ARDS, high vs low driving pressure; Bayesian time-to-event model for time to hypoxemia resolution</sub><br><sub>Zhe Chen | Time-to-event | Bayesian | 2 | Parallel-arm, Weibull PH fitted in JAGS | Bayesian survival model with Weibull distribution; Death as a competing event; 28-day administrative censoring; posterior probability decision rule | [analysis.Rmd](analyses/2025-09_parma-weibull-bayes/analysis.Rmd) |
 
 ### Column conventions
