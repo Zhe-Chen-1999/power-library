@@ -15,12 +15,12 @@ from it rather than from scratch.
 
 | Column | What goes in it |
 |---|---|
-| **Study** | Trial or grant name, year, a one-line description, then analyst and status on a second line. Status is `draft`, `final`, or `used in submission`. |
+| **Study** | Trial or grant name, year, a one-line description, and analyst on a second line. |
 | **Outcome** | Binary / Continuous / Time-to-event / Ordinal / Count |
 | **Framework** | frequentist / Bayesian |
 | **Arms** | Number of arms |
 | **Design** | Parallel-arm / Cluster-randomised / Stepped-wedge / Crossover, and how randomisation works |
-| **Key design features** | The things that determine whether this analysis is worth copying: clustering and ICC, repeated measures, multiplicity, competing risks, interim analyses, sample size constraints |
+| **Key design features** | The things that determine whether this analysis is worth copying, e.g., clustering and ICC, repeated measures, multiplicity, competing risks, sample size constraints |
 | **Code** | Link to the analysis document |
 
 ## How the documents are built
@@ -34,13 +34,10 @@ They share a common shape:
 
 | Section | What it does |
 |---|---|
-| The question | The design in plain sentences, including where each assumed number came from |
-| Assumptions | Every parameter the simulation depends on, in one chunk |
+| The question | The design features |
+| Assumptions | Every parameter the simulation depends on |
 | Machinery | The commented helper functions |
-| Validation | Checks the simulation against something computed a different way |
 | Results | Power tables and plots |
-| Sensitivity | Varies whatever was least certain in "The question" |
-| Assumptions and limitations | What the simulation does *not* represent |
 
 ## Adding an analysis
 
@@ -57,11 +54,4 @@ They share a common shape:
 
 3. Add a row to the index table above.
 
-Conventions worth keeping:
-
-- **Validate against something.** If the design has a closed form, check the
-  simulation against it and show the comparison. If it doesn't, verify the
-  data-generating model recovers the effect you asked for, and report the type I
-  error under the null. A simulation that produces a number is not the same as
-  one that produces the right number.
 
