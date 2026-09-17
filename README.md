@@ -26,8 +26,7 @@ from it rather than from scratch.
 ## How the documents are built
 
 **Each analysis is a single self-contained R Markdown file.** Nothing is
-`source()`d — the simulation loop, the data-generating model, the analysis, and
-(for the Bayesian one) the JAGS model all live in the file you're reading. 
+`source()`d — the simulation loop, the data-generating model, and the analysis all live in the file you're reading. 
 Every function is commented in detail.
 
 They share a common structure:
