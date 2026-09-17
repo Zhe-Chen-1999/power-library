@@ -383,7 +383,7 @@ ggplot(pd, aes(diff * 100, power, colour = factor(control * 100), group = contro
   scale_y_continuous(limits = c(0, 1)) +
   labs(x = "Absolute difference vs. control (percentage points)",
        y = "Power", colour = "Control\nrate (%)",
-       caption = paste0( "Dashed line = 80% power. Two-sided alpha = ", alpha_primary, "." )) +
+       caption = paste0( "Dashed line = 80% power. Two-sided alpha = ", alpha_2, "." )) +
   theme_minimal(base_size = 11)
 ```
 
