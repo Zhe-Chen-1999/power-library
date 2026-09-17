@@ -8,8 +8,8 @@ from it rather than from scratch.
 
 | Study | Outcome | Framework | Arms | Design | Key design features | Code |
 |---|---|---|---|---|---|---|
-| **PCORI LOI** (2026)<br><sub>Three-arm pragmatic trial; sample size, power at budget, rural/urban subgroups</sub><br><sub>Zhe Chen | Binary | frequentist | 3 | Parallel-arm, individually randomised | Two non-symmetric active arms; Bonferroni across 2 primary and 3 pairwise comparisons; prespecified subgroup power at a 1/3 vs 2/3 split; fixed N = 3000 | [analysis.Rmd](analyses/2026-09_pcori-3arm-binary/analysis.Rmd) |
-| **PARMA** (2025)<br><sub>Pediatric ARDS, high vs low driving pressure; Bayesian power for time to hypoxemia resolution</sub><br><sub>Zhe Chen | Time-to-event | Bayesian | 2 | Parallel-arm, Weibull PH fitted in JAGS | Death as a competing event, handled as cause-specific censoring; 28-day administrative censoring; posterior-probability decision rule; prior sensitivity | [analysis.Rmd](analyses/2025-09_parma-weibull-bayes/analysis.Rmd) |
+| **PCORI LOI** (2026)<br><sub>Three-arm pragmatic trial; sample size, power at budget, rural/urban subgroups</sub><br><sub>Zhe Chen | Binary | frequentist | 3 | Parallel-arm, individually randomised | Two active arms; Bonferroni across 2 primary and 3 pairwise comparisons; prespecified subgroup power at a 1/3 vs 2/3 split; fixed N = 3000 | [analysis.Rmd](analyses/2026-09_pcori-3arm-binary/analysis.Rmd) |
+| **PARMA** (2025)<br><sub>Pediatric ARDS, high vs low driving pressure; Bayesian power for time to hypoxemia resolution</sub><br><sub>Zhe Chen | Time-to-event | Bayesian | 2 | Parallel-arm, Weibull PH fitted in JAGS | Death as a competing event, handled as cause-specific censoring; 28-day administrative censoring; posterior-probability decision rule | [analysis.Rmd](analyses/2025-09_parma-weibull-bayes/analysis.Rmd) |
 
 ### Column conventions
 
@@ -34,7 +34,7 @@ They share a common shape:
 
 | Section | What it does |
 |---|---|
-| The question | The design features |
+| The question | The trial overview and design features |
 | Assumptions | Every parameter the simulation depends on |
 | Machinery | The commented helper functions |
 | Results | Power tables and plots |
